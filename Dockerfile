@@ -31,6 +31,7 @@ RUN mkdir src && \
     rm -f  target/release/libinference_rs-*
 
 # Copy real source code and build.
+COPY fonts/ fonts/
 COPY src/ src/
 RUN cargo build --release
 

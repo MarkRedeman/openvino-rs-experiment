@@ -21,12 +21,15 @@ inference-rs/
 ├── docker-compose.yml         # Convenience runner with volume mounts
 ├── build-standalone.sh        # Script to build & extract the standalone bundle
 ├── run-inference.sh           # Launcher script (bundled into standalone/)
+├── fonts/
+│   └── DejaVuSans.ttf         # Embedded font for detection label rendering
 ├── src/
 │   ├── main.rs                # CLI entry point (clap)
 │   ├── lib.rs                 # Module re-exports
 │   ├── engine.rs              # OpenVINO Core lifecycle, infer / infer_multi
 │   ├── preprocessing.rs       # Image load, resize, normalize → NHWC f32 Tensor
-│   └── postprocessing.rs      # top-K classification, SSD/YOLO/Geti detection decoding
+│   ├── postprocessing.rs      # top-K classification, SSD/YOLO/Geti detection decoding
+│   └── visualization.rs       # Draw detection boxes + labels to output image
 ├── models/                    # Place your OpenVINO IR models here
 └── images/                    # Place your input images here
 ```
@@ -85,6 +88,22 @@ docker run --rm \
   --threshold 0.5 \
   --width 992 \
   --height 800
+
+# Object detection + save annotated image
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  -v ./output:/output \
+  inference-rs-inference \
+  --model /models/fish-detection/model.xml \
+  --weights /models/fish-detection/model.bin \
+  --image /images/fish.png \
+  --task detect \
+  --detection-format geti \
+  --threshold 0.5 \
+  --width 992 \
+  --height 800 \
+  --output-image /output/fish-detected.png
 ```
 
 ### Standalone build (run without Docker)
@@ -148,6 +167,7 @@ Options:
   --height <PX>                Model input height [default: 224]
   --detection-format <FMT>     geti | ssd | yolo [default: geti]
   --num-classes <N>            Number of classes (YOLO only) [default: 80]
+  --output-image <PATH>        Save annotated detection image
   -h, --help                   Print help
   -V, --version                Print version
 ```
@@ -168,8 +188,12 @@ The runtime container runs as user `openvino` (uid 1001). Model and image files 
 chmod -R a+r models/ images/
 ```
 
+When saving an output image, either run the container with `--user "$(id -u):$(id -g)"`
+or make `output/` writable by uid 1001.
+
 ## Architecture notes
 
 - **Runtime linking**: The `openvino` crate is built with the `runtime-linking` feature. OpenVINO shared libraries are loaded via `dlopen` at runtime rather than linked at compile time. This is why `openvino_sys::library::load()` must be called before any other OpenVINO API call.
 - **Preprocessing pipeline**: Images are loaded with the `image` crate, resized and normalized to `[0.0, 1.0]` f32 NHWC tensors. The OpenVINO pre-process pipeline then handles NHWC→NCHW layout conversion and any further resizing to match the model's expected input dimensions.
 - **Multi-output support**: Models with multiple outputs (e.g., Geti detection with `boxes` + `labels`) use `infer_multi()` which returns a `HashMap<String, OutputBuffer>`. Single-output models use the simpler `infer()` path.
+- **Detection visualization**: When `--output-image` is set for detection tasks, the tool draws class-colored bounding boxes and text labels onto the original image, then saves the annotated image to disk.

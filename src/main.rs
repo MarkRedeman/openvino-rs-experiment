@@ -8,6 +8,7 @@ use inference_rs::postprocessing::{
     decode_geti_detections, decode_ssd_detections, decode_yolo_detections, top_k_classifications,
 };
 use inference_rs::preprocessing::load_image;
+use inference_rs::visualization::draw_detections;
 
 /// Run vision-model inference with OpenVINO.
 #[derive(Parser, Debug)]
@@ -56,6 +57,11 @@ struct Args {
     /// Number of classes (only used when --detection-format yolo).
     #[arg(long, default_value_t = 80)]
     num_classes: usize,
+
+    /// Save an annotated image with bounding boxes drawn on top (only for --task detect).
+    /// The output format is determined by the file extension (e.g. .png, .jpg).
+    #[arg(long)]
+    output_image: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -202,6 +208,19 @@ fn main() -> Result<()> {
                 }
             }
             println!("\nTotal detections: {}", detections.len());
+
+            // If --output-image was specified, draw bounding boxes on the original image.
+            if let Some(ref output_path) = args.output_image {
+                draw_detections(
+                    &args.image,
+                    output_path,
+                    &detections,
+                    &labels,
+                    args.width,
+                    args.height,
+                )?;
+                eprintln!("Annotated image saved to: {}", output_path.display());
+            }
         }
     }
 
