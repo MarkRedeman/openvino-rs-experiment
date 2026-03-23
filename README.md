@@ -152,6 +152,26 @@ docker run --rm \
   --benchmark-duration 10 \
   --benchmark-report-every 1 \
   --benchmark-stage-iters 30
+
+# Benchmark with OpenVINO resize backend (for A/B comparison)
+docker run --rm \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  inference-rs-inference \
+  --model /models/fish-detection/model.xml \
+  --weights /models/fish-detection/model.bin \
+  --image /images/fish.png \
+  --task benchmark \
+  --detection-format geti \
+  --threshold 0.3 \
+  --width 992 \
+  --height 800 \
+  --preprocess-backend openvino \
+  --benchmark-warmup 20 \
+  --benchmark-duration 10 \
+  --benchmark-report-every 1 \
+  --benchmark-stage-iters 300 \
+  --benchmark-stage-read-each-iter
 ```
 
 ### Standalone build (run without Docker)
@@ -213,6 +233,7 @@ Options:
   --threshold <F>              Confidence threshold for detection [default: 0.5]
   --width <PX>                 Model input width [default: 224]
   --height <PX>                Model input height [default: 224]
+  --preprocess-backend <BACK>  rust | openvino [default: rust]
   --detection-format <FMT>     geti | ssd | yolo [default: geti]
   --num-classes <N>            Number of classes (YOLO only) [default: 80]
   --output-image <PATH>        Save annotated detection image
@@ -222,6 +243,8 @@ Options:
   --benchmark-iters <N>        Measured benchmark iterations (overrides duration)
   --benchmark-report-every <S> Benchmark progress interval seconds [default: 1]
   --benchmark-stage-iters <N>  Rough stage timing iterations [default: 30, 0 disables]
+  --benchmark-stage-read-each-iter
+                               In stage timing, include read+decode every iteration
   -h, --help                   Print help
   -V, --version                Print version
 ```
@@ -248,9 +271,9 @@ or make `output/` writable by uid 1001.
 ## Architecture notes
 
 - **Runtime linking**: The `openvino` crate is built with the `runtime-linking` feature. OpenVINO shared libraries are loaded via `dlopen` at runtime rather than linked at compile time. This is why `openvino_sys::library::load()` must be called before any other OpenVINO API call.
-- **Preprocessing pipeline**: Images are loaded with the `image` crate, resized and normalized to `[0.0, 1.0]` f32 NHWC tensors. The OpenVINO pre-process pipeline then handles NHWC→NCHW layout conversion and any further resizing to match the model's expected input dimensions.
+- **Preprocessing pipeline**: `--preprocess-backend rust` resizes+normalizes in Rust before inference. `--preprocess-backend openvino` decodes in Rust but delegates resize to the OpenVINO pre-process pipeline.
 - **Multi-output support**: Models with multiple outputs (e.g., Geti detection with `boxes` + `labels`) use `infer_multi()` which returns a `HashMap<String, OutputBuffer>`. Single-output models use the simpler `infer()` path.
 - **Detection visualization**: When `--output-image` is set for detection tasks, the tool draws class-colored bounding boxes and text labels onto the original image, then saves the annotated image to disk.
 - **JSON export**: When `--output-json` is set, the tool writes pretty-printed JSON for all tasks: classification results, detections, or benchmark reports.
 - **Benchmark mode**: `--task benchmark` reuses the same loaded model and input image tensor, continuously runs inference, and reports throughput plus latency stats (mean/min/p50/p90/p95/p99/max).
-- **Benchmark stage timing**: Benchmark mode also reports rough average breakdown for preprocess, inference, and postprocess time shares.
+- **Benchmark stage timing**: Benchmark mode reports rough average breakdown for I/O+decode, preprocess (resize+tensor conversion), inference, and postprocess. By default, image decode happens once; add `--benchmark-stage-read-each-iter` to include read+decode cost each iteration.

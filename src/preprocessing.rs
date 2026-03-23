@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use image::GenericImageView;
+use image::{GenericImageView, RgbImage};
 use openvino::{ElementType, Shape, Tensor};
 use std::path::Path;
 
@@ -15,6 +15,24 @@ pub fn load_image(path: &Path, width: u32, height: u32) -> Result<Tensor> {
 
     let resized = img.resize_exact(width, height, image::imageops::FilterType::Triangle);
     let rgb = resized.to_rgb8();
+
+    rgb8_to_tensor(&rgb)
+}
+
+/// Load an image from disk without resizing and pack it into an OpenVINO F32
+/// NHWC tensor. Useful when resizing is delegated to OpenVINO preprocessing.
+pub fn load_image_no_resize(path: &Path) -> Result<Tensor> {
+    let img =
+        image::open(path).with_context(|| format!("failed to open image: {}", path.display()))?;
+    let rgb = img.to_rgb8();
+    rgb8_to_tensor(&rgb)
+}
+
+/// Convert an RGB8 image into an OpenVINO F32 NHWC tensor with shape
+/// `[1, height, width, 3]` and values normalized to `[0.0, 1.0]`.
+pub fn rgb8_to_tensor(rgb: &RgbImage) -> Result<Tensor> {
+    let width = rgb.width();
+    let height = rgb.height();
 
     let shape = Shape::new(&[1, height as i64, width as i64, 3])
         .context("failed to create tensor shape")?;

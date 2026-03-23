@@ -11,7 +11,7 @@ use inference_rs::labels::parse_labels_from_model_xml;
 use inference_rs::postprocessing::{
     decode_geti_detections, decode_ssd_detections, decode_yolo_detections, top_k_classifications,
 };
-use inference_rs::preprocessing::load_image;
+use inference_rs::preprocessing::{load_image, load_image_no_resize, rgb8_to_tensor};
 use inference_rs::visualization::draw_detections;
 
 /// Run vision-model inference with OpenVINO.
@@ -91,6 +91,17 @@ struct Args {
     /// Set to 0 to disable stage timing.
     #[arg(long, default_value_t = 30)]
     benchmark_stage_iters: usize,
+
+    /// In benchmark stage timing, read+decode the image every iteration.
+    /// By default, decode happens once and only resize+tensor conversion are repeated.
+    #[arg(long, default_value_t = false)]
+    benchmark_stage_read_each_iter: bool,
+
+    /// Preprocessing backend.
+    /// - rust: resize + normalize in Rust before inference.
+    /// - openvino: decode in Rust, delegate resize to OpenVINO preprocess pipeline.
+    #[arg(long, value_enum, default_value_t = PreprocessBackend::Rust)]
+    preprocess_backend: PreprocessBackend,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -108,6 +119,12 @@ enum DetectionFormat {
     Ssd,
     /// YOLO-style: output shape [1, N, 5 + num_classes].
     Yolo,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+enum PreprocessBackend {
+    Rust,
+    Openvino,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +176,7 @@ struct BenchmarkJsonOutput {
     image: String,
     model: String,
     device: String,
+    preprocess_backend: PreprocessBackend,
     model_input_width: u32,
     model_input_height: u32,
     config: BenchmarkConfig,
@@ -169,10 +187,13 @@ struct BenchmarkJsonOutput {
 #[derive(Debug, Clone, Serialize)]
 struct StageTimingReport {
     iterations: usize,
+    stage_read_each_iter: bool,
+    io_decode_mean_ms: f64,
     preprocess_mean_ms: f64,
     inference_mean_ms: f64,
     postprocess_mean_ms: f64,
     total_mean_ms: f64,
+    io_decode_share_pct: f64,
     preprocess_share_pct: f64,
     inference_share_pct: f64,
     postprocess_share_pct: f64,
@@ -284,6 +305,7 @@ fn write_benchmark_json(
     image_path: &PathBuf,
     model_path: &PathBuf,
     device: &str,
+    preprocess_backend: PreprocessBackend,
     model_width: u32,
     model_height: u32,
 ) -> Result<()> {
@@ -292,6 +314,7 @@ fn write_benchmark_json(
         image: image_path.display().to_string(),
         model: model_path.display().to_string(),
         device: device.to_string(),
+        preprocess_backend,
         model_input_width: model_width,
         model_input_height: model_height,
         config: cfg.clone(),
@@ -313,17 +336,71 @@ fn run_stage_timing(
         return Ok(None);
     }
 
+    let mut io_decode_ms_sum = 0.0f64;
     let mut preprocess_ms_sum = 0.0f64;
     let mut inference_ms_sum = 0.0f64;
     let mut postprocess_ms_sum = 0.0f64;
     let mut total_ms_sum = 0.0f64;
 
+    let decoded_once = if args.benchmark_stage_read_each_iter {
+        None
+    } else {
+        let t = Instant::now();
+        let img = image::open(&args.image)
+            .with_context(|| format!("failed to open image: {}", args.image.display()))?;
+        let rgb = img.to_rgb8();
+        io_decode_ms_sum += t.elapsed().as_secs_f64() * 1000.0;
+        Some(rgb)
+    };
+
+    let use_openvino_preprocess = matches!(args.preprocess_backend, PreprocessBackend::Openvino);
+
     for _ in 0..args.benchmark_stage_iters {
         let total_start = Instant::now();
 
-        let t0 = Instant::now();
-        let tensor = load_image(&args.image, args.width, args.height)?;
-        let t1 = Instant::now();
+        let tensor = if args.benchmark_stage_read_each_iter {
+            let t = Instant::now();
+            let img = image::open(&args.image)
+                .with_context(|| format!("failed to open image: {}", args.image.display()))?;
+            let src_rgb = img.to_rgb8();
+            io_decode_ms_sum += t.elapsed().as_secs_f64() * 1000.0;
+
+            let t0 = Instant::now();
+            let tensor = if use_openvino_preprocess {
+                rgb8_to_tensor(&src_rgb)?
+            } else {
+                let resized = image::imageops::resize(
+                    &src_rgb,
+                    args.width,
+                    args.height,
+                    image::imageops::FilterType::Triangle,
+                );
+                rgb8_to_tensor(&resized)?
+            };
+            let t1 = Instant::now();
+            preprocess_ms_sum += (t1 - t0).as_secs_f64() * 1000.0;
+            tensor
+        } else {
+            let src_rgb = decoded_once
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("benchmark stage timing: missing decoded image"))?;
+
+            let t0 = Instant::now();
+            let tensor = if use_openvino_preprocess {
+                rgb8_to_tensor(src_rgb)?
+            } else {
+                let resized = image::imageops::resize(
+                    src_rgb,
+                    args.width,
+                    args.height,
+                    image::imageops::FilterType::Triangle,
+                );
+                rgb8_to_tensor(&resized)?
+            };
+            let t1 = Instant::now();
+            preprocess_ms_sum += (t1 - t0).as_secs_f64() * 1000.0;
+            tensor
+        };
 
         let use_detection_path =
             args.detection_format != DetectionFormat::Geti || engine.output_names().len() > 1;
@@ -350,7 +427,6 @@ fn run_stage_timing(
                         args.threshold,
                     );
 
-                    preprocess_ms_sum += (t1 - t0).as_secs_f64() * 1000.0;
                     inference_ms_sum += (t3 - t2).as_secs_f64() * 1000.0;
                     postprocess_ms_sum += (Instant::now() - t3).as_secs_f64() * 1000.0;
                 }
@@ -359,7 +435,6 @@ fn run_stage_timing(
                     let t3 = Instant::now();
                     let _detections = decode_ssd_detections(&output, args.threshold);
 
-                    preprocess_ms_sum += (t1 - t0).as_secs_f64() * 1000.0;
                     inference_ms_sum += (t3 - t2).as_secs_f64() * 1000.0;
                     postprocess_ms_sum += (Instant::now() - t3).as_secs_f64() * 1000.0;
                 }
@@ -369,7 +444,6 @@ fn run_stage_timing(
                     let _detections =
                         decode_yolo_detections(&output, args.num_classes, args.threshold);
 
-                    preprocess_ms_sum += (t1 - t0).as_secs_f64() * 1000.0;
                     inference_ms_sum += (t3 - t2).as_secs_f64() * 1000.0;
                     postprocess_ms_sum += (Instant::now() - t3).as_secs_f64() * 1000.0;
                 }
@@ -381,7 +455,6 @@ fn run_stage_timing(
             let _results = top_k_classifications(&output, args.top_k);
             let _ = labels;
 
-            preprocess_ms_sum += (t1 - t0).as_secs_f64() * 1000.0;
             inference_ms_sum += (t3 - t2).as_secs_f64() * 1000.0;
             postprocess_ms_sum += (Instant::now() - t3).as_secs_f64() * 1000.0;
         }
@@ -390,19 +463,24 @@ fn run_stage_timing(
     }
 
     let n = args.benchmark_stage_iters as f64;
+    let io_decode_mean_ms = io_decode_ms_sum / n;
     let preprocess_mean_ms = preprocess_ms_sum / n;
     let inference_mean_ms = inference_ms_sum / n;
     let postprocess_mean_ms = postprocess_ms_sum / n;
     let total_mean_ms = total_ms_sum / n;
 
-    let denom = (preprocess_mean_ms + inference_mean_ms + postprocess_mean_ms).max(1e-9);
+    let denom = (io_decode_mean_ms + preprocess_mean_ms + inference_mean_ms + postprocess_mean_ms)
+        .max(1e-9);
 
     Ok(Some(StageTimingReport {
         iterations: args.benchmark_stage_iters,
+        stage_read_each_iter: args.benchmark_stage_read_each_iter,
+        io_decode_mean_ms,
         preprocess_mean_ms,
         inference_mean_ms,
         postprocess_mean_ms,
         total_mean_ms,
+        io_decode_share_pct: io_decode_mean_ms * 100.0 / denom,
         preprocess_share_pct: preprocess_mean_ms * 100.0 / denom,
         inference_share_pct: inference_mean_ms * 100.0 / denom,
         postprocess_share_pct: postprocess_mean_ms * 100.0 / denom,
@@ -429,13 +507,17 @@ fn main() -> Result<()> {
     }
 
     eprintln!(
-        "Loading image: {} (resize to {}x{})",
+        "Loading image: {} (target {}x{}, preprocess backend: {:?})",
         args.image.display(),
         args.width,
-        args.height
+        args.height,
+        args.preprocess_backend,
     );
 
-    let tensor = load_image(&args.image, args.width, args.height)?;
+    let tensor = match args.preprocess_backend {
+        PreprocessBackend::Rust => load_image(&args.image, args.width, args.height)?,
+        PreprocessBackend::Openvino => load_image_no_resize(&args.image)?,
+    };
 
     eprintln!(
         "Loading model: {} (device: {})",
@@ -621,6 +703,11 @@ fn main() -> Result<()> {
                 println!("\nStage timing (rough)");
                 println!("--------------------");
                 println!("Iterations          : {}", stage.iterations);
+                println!("Read each iter      : {}", stage.stage_read_each_iter);
+                println!(
+                    "IO+Decode (ms)      : {:.3} ({:.1}%)",
+                    stage.io_decode_mean_ms, stage.io_decode_share_pct
+                );
                 println!(
                     "Preprocess (ms)     : {:.3} ({:.1}%)",
                     stage.preprocess_mean_ms, stage.preprocess_share_pct
@@ -645,6 +732,7 @@ fn main() -> Result<()> {
                     &args.image,
                     &args.model,
                     &args.device,
+                    args.preprocess_backend,
                     args.width,
                     args.height,
                 )?;
