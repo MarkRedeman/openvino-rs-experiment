@@ -1,5 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
+use serde::Serialize;
+use std::fs;
 use std::path::PathBuf;
 
 use inference_rs::engine::Engine;
@@ -62,6 +64,10 @@ struct Args {
     /// The output format is determined by the file extension (e.g. .png, .jpg).
     #[arg(long)]
     output_image: Option<PathBuf>,
+
+    /// Save results as JSON (supports both --task classify and --task detect).
+    #[arg(long)]
+    output_json: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -78,6 +84,147 @@ enum DetectionFormat {
     Ssd,
     /// YOLO-style: output shape [1, N, 5 + num_classes].
     Yolo,
+}
+
+#[derive(Debug, Serialize)]
+struct DetectionJsonRecord {
+    class_id: usize,
+    label: Option<String>,
+    confidence: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct ClassificationJsonRecord {
+    class_id: usize,
+    label: Option<String>,
+    probability: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct ClassificationJsonOutput {
+    task: &'static str,
+    top_k: usize,
+    image: String,
+    model: String,
+    model_input_width: u32,
+    model_input_height: u32,
+    count: usize,
+    results: Vec<ClassificationJsonRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct DetectionJsonOutput {
+    task: &'static str,
+    detection_format: String,
+    threshold: f32,
+    image: String,
+    model: String,
+    model_input_width: u32,
+    model_input_height: u32,
+    count: usize,
+    detections: Vec<DetectionJsonRecord>,
+}
+
+fn write_json_file(output_path: &PathBuf, content: &str, kind: &str) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create {kind} JSON directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    fs::write(output_path, content).with_context(|| {
+        format!(
+            "failed to write {kind} JSON output: {}",
+            output_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn write_classification_json(
+    output_path: &PathBuf,
+    results: &[inference_rs::postprocessing::Classification],
+    labels: &[String],
+    top_k: usize,
+    image_path: &PathBuf,
+    model_path: &PathBuf,
+    model_width: u32,
+    model_height: u32,
+) -> Result<()> {
+    let records = results
+        .iter()
+        .map(|c| ClassificationJsonRecord {
+            class_id: c.class_id,
+            label: labels.get(c.class_id).cloned(),
+            probability: c.probability,
+        })
+        .collect();
+
+    let payload = ClassificationJsonOutput {
+        task: "classify",
+        top_k,
+        image: image_path.display().to_string(),
+        model: model_path.display().to_string(),
+        model_input_width: model_width,
+        model_input_height: model_height,
+        count: results.len(),
+        results: records,
+    };
+
+    let json = serde_json::to_string_pretty(&payload)
+        .context("failed to serialize classification JSON")?;
+    write_json_file(output_path, &json, "classification")
+}
+
+fn write_detection_json(
+    output_path: &PathBuf,
+    detections: &[inference_rs::postprocessing::Detection],
+    labels: &[String],
+    detection_format: &DetectionFormat,
+    threshold: f32,
+    image_path: &PathBuf,
+    model_path: &PathBuf,
+    model_width: u32,
+    model_height: u32,
+) -> Result<()> {
+    let records = detections
+        .iter()
+        .map(|d| DetectionJsonRecord {
+            class_id: d.class_id,
+            label: labels.get(d.class_id).cloned(),
+            confidence: d.confidence,
+            x1: d.x1,
+            y1: d.y1,
+            x2: d.x2,
+            y2: d.y2,
+        })
+        .collect();
+
+    let payload = DetectionJsonOutput {
+        task: "detect",
+        detection_format: format!("{detection_format:?}").to_lowercase(),
+        threshold,
+        image: image_path.display().to_string(),
+        model: model_path.display().to_string(),
+        model_input_width: model_width,
+        model_input_height: model_height,
+        count: detections.len(),
+        detections: records,
+    };
+
+    let json =
+        serde_json::to_string_pretty(&payload).context("failed to serialize detection JSON")?;
+    write_json_file(output_path, &json, "detection")
 }
 
 fn main() -> Result<()> {
@@ -144,6 +291,20 @@ fn main() -> Result<()> {
                     let label = labels.get(c.class_id).map(|s| s.as_str()).unwrap_or("?");
                     println!("{:<10} {:<20} {:.6}", c.class_id, label, c.probability);
                 }
+            }
+
+            if let Some(ref output_path) = args.output_json {
+                write_classification_json(
+                    output_path,
+                    &results,
+                    &labels,
+                    args.top_k,
+                    &args.image,
+                    &args.model,
+                    args.width,
+                    args.height,
+                )?;
+                eprintln!("Classification JSON saved to: {}", output_path.display());
             }
         }
         Task::Detect => {
@@ -220,6 +381,21 @@ fn main() -> Result<()> {
                     args.height,
                 )?;
                 eprintln!("Annotated image saved to: {}", output_path.display());
+            }
+
+            if let Some(ref output_path) = args.output_json {
+                write_detection_json(
+                    output_path,
+                    &detections,
+                    &labels,
+                    &args.detection_format,
+                    args.threshold,
+                    &args.image,
+                    &args.model,
+                    args.width,
+                    args.height,
+                )?;
+                eprintln!("Detection JSON saved to: {}", output_path.display());
             }
         }
     }

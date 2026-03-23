@@ -75,6 +75,21 @@ docker run --rm \
   --width 224 \
   --height 224
 
+# Classification + save JSON
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  -v ./output:/output \
+  inference-rs-inference \
+  --model /models/card-classification/model.xml \
+  --weights /models/card-classification/model.bin \
+  --image /images/diamond-card.jpg \
+  --task classify \
+  --top-k 4 \
+  --width 224 \
+  --height 224 \
+  --output-json /output/card-classification.json
+
 # Object detection (Geti/OTX format)
 docker run --rm \
   -v ./models:/models:ro \
@@ -104,6 +119,22 @@ docker run --rm --user "$(id -u):$(id -g)" \
   --width 992 \
   --height 800 \
   --output-image /output/fish-detected.png
+
+# Object detection + save machine-readable JSON
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  -v ./output:/output \
+  inference-rs-inference \
+  --model /models/fish-detection/model.xml \
+  --weights /models/fish-detection/model.bin \
+  --image /images/fish.png \
+  --task detect \
+  --detection-format geti \
+  --threshold 0.5 \
+  --width 992 \
+  --height 800 \
+  --output-json /output/fish-detected.json
 ```
 
 ### Standalone build (run without Docker)
@@ -168,6 +199,7 @@ Options:
   --detection-format <FMT>     geti | ssd | yolo [default: geti]
   --num-classes <N>            Number of classes (YOLO only) [default: 80]
   --output-image <PATH>        Save annotated detection image
+  --output-json <PATH>         Save results as JSON
   -h, --help                   Print help
   -V, --version                Print version
 ```
@@ -197,3 +229,4 @@ or make `output/` writable by uid 1001.
 - **Preprocessing pipeline**: Images are loaded with the `image` crate, resized and normalized to `[0.0, 1.0]` f32 NHWC tensors. The OpenVINO pre-process pipeline then handles NHWC→NCHW layout conversion and any further resizing to match the model's expected input dimensions.
 - **Multi-output support**: Models with multiple outputs (e.g., Geti detection with `boxes` + `labels`) use `infer_multi()` which returns a `HashMap<String, OutputBuffer>`. Single-output models use the simpler `infer()` path.
 - **Detection visualization**: When `--output-image` is set for detection tasks, the tool draws class-colored bounding boxes and text labels onto the original image, then saves the annotated image to disk.
+- **JSON export**: When `--output-json` is set, the tool writes pretty-printed JSON for both tasks: classification results for `classify`, or detections for `detect`.

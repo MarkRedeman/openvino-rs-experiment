@@ -1,5 +1,7 @@
+use serde::Serialize;
+
 /// A single classification result: a class id paired with its probability.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Classification {
     pub class_id: usize,
     pub probability: f32,
@@ -28,7 +30,7 @@ pub fn top_k_classifications(output: &[f32], k: usize) -> Vec<Classification> {
 }
 
 /// A single object detection result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Detection {
     /// Bounding box: top-left x (normalized 0..1 or absolute pixels depending
     /// on the model).
