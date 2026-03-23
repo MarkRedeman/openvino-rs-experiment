@@ -1,0 +1,12 @@
+[package]
+name = "inference-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+openvino = { version = "0.9", features = ["runtime-linking"] }
+openvino-sys = { version = "0.9", features = ["runtime-linking"] }
+image = "0.25"
+ndarray = "0.16"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

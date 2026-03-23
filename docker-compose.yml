@@ -1,0 +1,17 @@
+services:
+  inference:
+    build: .
+    volumes:
+      - ./models:/models:ro
+      - ./images:/images:ro
+    # Example: classify a card image.
+    # Adjust paths and arguments to match your model.
+    command: >
+      --model /models/card-classification/model.xml
+      --weights /models/card-classification/model.bin
+      --image /images/diamond-card.jpg
+      --task classify
+      --top-k 4
+      --width 224
+      --height 224
+      --device CPU
