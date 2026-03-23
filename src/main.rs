@@ -3,6 +3,7 @@ use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
 use inference_rs::engine::Engine;
+use inference_rs::labels::parse_labels_from_model_xml;
 use inference_rs::postprocessing::{
     decode_geti_detections, decode_ssd_detections, decode_yolo_detections, top_k_classifications,
 };
@@ -112,16 +113,31 @@ fn main() -> Result<()> {
     eprintln!("  input  : {}", engine.input_name());
     eprintln!("  outputs: [{}]", engine.output_names().join(", "));
 
+    // Try to extract class label names from the model XML metadata.
+    let labels = parse_labels_from_model_xml(&args.model).unwrap_or_default();
+    if !labels.is_empty() {
+        eprintln!("  labels : {:?}", labels);
+    }
+
     eprintln!("Running inference …");
 
     match args.task {
         Task::Classify => {
             let output = engine.infer(&tensor)?;
             let results = top_k_classifications(&output, args.top_k);
-            println!("{:<10} {}", "CLASS ID", "PROBABILITY");
-            println!("{:-<10} {:-<12}", "", "");
-            for c in &results {
-                println!("{:<10} {:.6}", c.class_id, c.probability);
+            if labels.is_empty() {
+                println!("{:<10} {}", "CLASS ID", "PROBABILITY");
+                println!("{:-<10} {:-<12}", "", "");
+                for c in &results {
+                    println!("{:<10} {:.6}", c.class_id, c.probability);
+                }
+            } else {
+                println!("{:<10} {:<20} {}", "CLASS ID", "LABEL", "PROBABILITY");
+                println!("{:-<10} {:-<20} {:-<12}", "", "", "");
+                for c in &results {
+                    let label = labels.get(c.class_id).map(|s| s.as_str()).unwrap_or("?");
+                    println!("{:<10} {:<20} {:.6}", c.class_id, label, c.probability);
+                }
             }
         }
         Task::Detect => {
@@ -155,19 +171,35 @@ fn main() -> Result<()> {
                 }
             };
 
-            println!(
-                "{:<8} {:<10} {:<10} {:<10} {:<10} {:<10}",
-                "CLASS", "CONF", "X1", "Y1", "X2", "Y2"
-            );
-            println!("{:-<60}", "");
+            if labels.is_empty() {
+                println!(
+                    "{:<8} {:<10} {:<10} {:<10} {:<10} {:<10}",
+                    "CLASS", "CONF", "X1", "Y1", "X2", "Y2"
+                );
+                println!("{:-<60}", "");
+            } else {
+                println!(
+                    "{:<8} {:<16} {:<10} {:<10} {:<10} {:<10} {:<10}",
+                    "CLASS", "LABEL", "CONF", "X1", "Y1", "X2", "Y2"
+                );
+                println!("{:-<76}", "");
+            }
             if detections.is_empty() {
                 println!("(no detections above threshold {:.2})", args.threshold);
             }
             for d in &detections {
-                println!(
-                    "{:<8} {:<10.4} {:<10.2} {:<10.2} {:<10.2} {:<10.2}",
-                    d.class_id, d.confidence, d.x1, d.y1, d.x2, d.y2
-                );
+                if labels.is_empty() {
+                    println!(
+                        "{:<8} {:<10.4} {:<10.2} {:<10.2} {:<10.2} {:<10.2}",
+                        d.class_id, d.confidence, d.x1, d.y1, d.x2, d.y2
+                    );
+                } else {
+                    let label = labels.get(d.class_id).map(|s| s.as_str()).unwrap_or("?");
+                    println!(
+                        "{:<8} {:<16} {:<10.4} {:<10.2} {:<10.2} {:<10.2} {:<10.2}",
+                        d.class_id, label, d.confidence, d.x1, d.y1, d.x2, d.y2
+                    );
+                }
             }
             println!("\nTotal detections: {}", detections.len());
         }
