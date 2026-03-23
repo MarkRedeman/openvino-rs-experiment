@@ -16,16 +16,19 @@ The entire build and runtime environment is Dockerized — **only Docker is requ
 ```
 inference-rs/
 ├── Cargo.toml
-├── Dockerfile               # Multi-stage: openvino dev → runtime
-├── docker-compose.yml       # Convenience runner with volume mounts
+├── Dockerfile                 # Multi-stage: openvino dev → runtime
+├── Dockerfile.standalone      # Builds a portable bundle (binary + .so libs)
+├── docker-compose.yml         # Convenience runner with volume mounts
+├── build-standalone.sh        # Script to build & extract the standalone bundle
+├── run-inference.sh           # Launcher script (bundled into standalone/)
 ├── src/
-│   ├── main.rs              # CLI entry point (clap)
-│   ├── lib.rs               # Module re-exports
-│   ├── engine.rs            # OpenVINO Core lifecycle, infer / infer_multi
-│   ├── preprocessing.rs     # Image load, resize, normalize → NHWC f32 Tensor
-│   └── postprocessing.rs    # top-K classification, SSD/YOLO/Geti detection decoding
-├── models/                  # Place your OpenVINO IR models here
-└── images/                  # Place your input images here
+│   ├── main.rs                # CLI entry point (clap)
+│   ├── lib.rs                 # Module re-exports
+│   ├── engine.rs              # OpenVINO Core lifecycle, infer / infer_multi
+│   ├── preprocessing.rs       # Image load, resize, normalize → NHWC f32 Tensor
+│   └── postprocessing.rs      # top-K classification, SSD/YOLO/Geti detection decoding
+├── models/                    # Place your OpenVINO IR models here
+└── images/                    # Place your input images here
 ```
 
 ## Build
@@ -83,6 +86,50 @@ docker run --rm \
   --width 992 \
   --height 800
 ```
+
+### Standalone build (run without Docker)
+
+You can compile the binary inside Docker, then extract it alongside the required
+OpenVINO shared libraries into a self-contained directory that runs on any
+x86_64 Linux host — no Docker or OpenVINO installation needed at runtime.
+
+```bash
+./build-standalone.sh
+```
+
+This produces a `standalone/` directory:
+
+```
+standalone/
+├── inference-rs          # the binary (~3.8 MB)
+├── lib/                  # OpenVINO + TBB shared libraries (~71 MB)
+└── run-inference.sh      # launcher that sets LD_LIBRARY_PATH
+```
+
+Run inference directly:
+
+```bash
+./standalone/run-inference.sh \
+  --model models/card-classification/model.xml \
+  --weights models/card-classification/model.bin \
+  --image images/diamond-card.jpg \
+  --task classify \
+  --top-k 4
+
+./standalone/run-inference.sh \
+  --model models/fish-detection/model.xml \
+  --weights models/fish-detection/model.bin \
+  --image images/fish.png \
+  --task detect \
+  --detection-format geti \
+  --threshold 0.3 \
+  --width 992 \
+  --height 800
+```
+
+The `standalone/` directory is portable — you can tar it up and copy it to
+another machine. The only requirement is a compatible x86_64 Linux with glibc
+(Ubuntu 22.04+, Debian 12+, RHEL 9+, etc.).
 
 ### CLI reference
 

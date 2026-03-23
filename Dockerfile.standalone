@@ -1,0 +1,94 @@
+# ==============================================================================
+# Dockerfile.standalone
+#
+# Builds inference-rs and stages it alongside the minimal set of OpenVINO
+# runtime libraries needed for CPU inference with IR models.
+#
+# The final stage is a flat directory at /standalone containing:
+#   inference-rs          — the binary
+#   lib/                  — OpenVINO + TBB shared libraries
+#   run-inference.sh      — launcher that sets LD_LIBRARY_PATH
+#
+# Usage:
+#   docker build -f Dockerfile.standalone -t inference-rs-standalone .
+#   docker run --rm inference-rs-standalone > inference-rs-standalone.tar.gz
+# ==============================================================================
+FROM openvino/ubuntu24_dev:2026.0.0 AS builder
+
+USER root
+
+# Install the Rust toolchain (stable).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl build-essential pkg-config && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /app
+
+# Cache dependencies by building a dummy project first.
+COPY Cargo.toml Cargo.lock* ./
+RUN mkdir src && \
+    echo 'fn main() {}' > src/main.rs && \
+    echo '' > src/lib.rs && \
+    cargo build --release 2>/dev/null || true && \
+    rm -rf src && \
+    rm -f  target/release/inference-rs target/release/deps/inference_rs-* && \
+    rm -rf target/release/.fingerprint/inference-rs-* && \
+    rm -f  target/release/deps/libinference_rs-* && \
+    rm -f  target/release/libinference_rs-*
+
+# Copy real source code and build.
+COPY src/ src/
+RUN cargo build --release
+
+# ==============================================================================
+# Stage 2: Assemble the standalone bundle.
+#
+# We use the runtime image so we pick up the exact .so files that match the
+# version our binary was compiled against.
+# ==============================================================================
+FROM openvino/ubuntu24_runtime:2026.0.0 AS assembler
+
+USER root
+
+# Paths inside the OpenVINO runtime image.
+ARG OV_LIB=/opt/intel/openvino_2026.0.0.0/runtime/lib/intel64
+ARG OV_TBB=/opt/intel/openvino_2026.0.0.0/runtime/3rdparty/tbb/lib
+
+RUN mkdir -p /standalone/lib
+
+COPY --from=builder /app/target/release/inference-rs /standalone/inference-rs
+
+# Core libraries (C API + C++ runtime).
+RUN cp -P ${OV_LIB}/libopenvino_c.so*    /standalone/lib/ && \
+    cp -P ${OV_LIB}/libopenvino.so*       /standalone/lib/
+
+# Intel TBB (threading runtime).
+RUN cp -P ${OV_TBB}/libtbb.so*           /standalone/lib/ && \
+    cp -P ${OV_TBB}/libtbbmalloc.so*     /standalone/lib/ 2>/dev/null || true
+
+# CPU plugin — required for --device CPU.
+RUN cp -P ${OV_LIB}/libopenvino_intel_cpu_plugin.so /standalone/lib/
+
+# AUTO/HETERO plugins — OpenVINO may probe these even with explicit CPU device.
+RUN cp -P ${OV_LIB}/libopenvino_auto_plugin.so        /standalone/lib/ && \
+    cp -P ${OV_LIB}/libopenvino_hetero_plugin.so       /standalone/lib/ && \
+    cp -P ${OV_LIB}/libopenvino_auto_batch_plugin.so   /standalone/lib/
+
+# IR frontend — required to load .xml/.bin model files.
+RUN cp -P ${OV_LIB}/libopenvino_ir_frontend.so*  /standalone/lib/
+
+# Copy the launcher script.
+COPY run-inference.sh /standalone/run-inference.sh
+RUN chmod +x /standalone/run-inference.sh /standalone/inference-rs
+
+# ==============================================================================
+# Stage 3: Minimal image that just tars up the bundle and writes to stdout.
+# ==============================================================================
+FROM ubuntu:24.04
+
+COPY --from=assembler /standalone /standalone
+
+CMD ["tar", "czf", "-", "-C", "/", "standalone"]
