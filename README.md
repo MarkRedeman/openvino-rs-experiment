@@ -1,7 +1,7 @@
 # inference-rs
 
 Vision model inference in Rust using [OpenVINO](https://docs.openvino.ai/).
-Supports image classification and object detection (Geti/OTX, SSD, YOLO output formats).
+Supports image classification, object detection (Geti/OTX, SSD, YOLO output formats), and benchmark mode.
 
 The entire build and runtime environment is Dockerized — **only Docker is required** on the host machine.
 
@@ -29,6 +29,7 @@ inference-rs/
 │   ├── engine.rs              # OpenVINO Core lifecycle, infer / infer_multi
 │   ├── preprocessing.rs       # Image load, resize, normalize → NHWC f32 Tensor
 │   ├── postprocessing.rs      # top-K classification, SSD/YOLO/Geti detection decoding
+│   ├── benchmark.rs           # Throughput/latency benchmark runner
 │   └── visualization.rs       # Draw detection boxes + labels to output image
 ├── models/                    # Place your OpenVINO IR models here
 └── images/                    # Place your input images here
@@ -135,6 +136,22 @@ docker run --rm --user "$(id -u):$(id -g)" \
   --width 992 \
   --height 800 \
   --output-json /output/fish-detected.json
+
+# Benchmark mode (load model once, run repeated inference)
+docker run --rm \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  inference-rs-inference \
+  --model /models/card-classification/model.xml \
+  --weights /models/card-classification/model.bin \
+  --image /images/diamond-card.jpg \
+  --task benchmark \
+  --width 224 \
+  --height 224 \
+  --benchmark-warmup 20 \
+  --benchmark-duration 10 \
+  --benchmark-report-every 1 \
+  --benchmark-stage-iters 30
 ```
 
 ### Standalone build (run without Docker)
@@ -191,7 +208,7 @@ Options:
   --weights <PATH>             Path to the OpenVINO IR weights (.bin)
   --image <PATH>               Path to the input image
   --device <DEVICE>            Inference device [default: CPU]
-  --task <TASK>                classify | detect [default: classify]
+  --task <TASK>                classify | detect | benchmark [default: classify]
   --top-k <N>                  Top-K results for classification [default: 5]
   --threshold <F>              Confidence threshold for detection [default: 0.5]
   --width <PX>                 Model input width [default: 224]
@@ -200,6 +217,11 @@ Options:
   --num-classes <N>            Number of classes (YOLO only) [default: 80]
   --output-image <PATH>        Save annotated detection image
   --output-json <PATH>         Save results as JSON
+  --benchmark-duration <SEC>   Benchmark duration in seconds [default: 10]
+  --benchmark-warmup <N>       Warmup iterations [default: 20]
+  --benchmark-iters <N>        Measured benchmark iterations (overrides duration)
+  --benchmark-report-every <S> Benchmark progress interval seconds [default: 1]
+  --benchmark-stage-iters <N>  Rough stage timing iterations [default: 30, 0 disables]
   -h, --help                   Print help
   -V, --version                Print version
 ```
@@ -229,4 +251,6 @@ or make `output/` writable by uid 1001.
 - **Preprocessing pipeline**: Images are loaded with the `image` crate, resized and normalized to `[0.0, 1.0]` f32 NHWC tensors. The OpenVINO pre-process pipeline then handles NHWC→NCHW layout conversion and any further resizing to match the model's expected input dimensions.
 - **Multi-output support**: Models with multiple outputs (e.g., Geti detection with `boxes` + `labels`) use `infer_multi()` which returns a `HashMap<String, OutputBuffer>`. Single-output models use the simpler `infer()` path.
 - **Detection visualization**: When `--output-image` is set for detection tasks, the tool draws class-colored bounding boxes and text labels onto the original image, then saves the annotated image to disk.
-- **JSON export**: When `--output-json` is set, the tool writes pretty-printed JSON for both tasks: classification results for `classify`, or detections for `detect`.
+- **JSON export**: When `--output-json` is set, the tool writes pretty-printed JSON for all tasks: classification results, detections, or benchmark reports.
+- **Benchmark mode**: `--task benchmark` reuses the same loaded model and input image tensor, continuously runs inference, and reports throughput plus latency stats (mean/min/p50/p90/p95/p99/max).
+- **Benchmark stage timing**: Benchmark mode also reports rough average breakdown for preprocess, inference, and postprocess time shares.

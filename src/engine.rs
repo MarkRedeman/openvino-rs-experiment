@@ -166,6 +166,23 @@ impl Engine {
         Ok(map)
     }
 
+    /// Create an inference request that can be reused across many runs.
+    pub fn create_request(&mut self) -> Result<InferRequest> {
+        self.compiled
+            .create_infer_request()
+            .context("failed to create infer request")
+    }
+
+    /// Run inference using an existing request without reading outputs.
+    ///
+    /// Useful for benchmarking pure inference throughput/latency.
+    pub fn run_request(&self, request: &mut InferRequest, input: &Tensor) -> Result<()> {
+        request
+            .set_tensor(&self.input_name, input)
+            .context("failed to set input tensor")?;
+        request.infer().context("inference failed")
+    }
+
     /// The name assigned to the model's first input port.
     pub fn input_name(&self) -> &str {
         &self.input_name
