@@ -5,6 +5,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use inference_rs::act::{
+    load_metadata, load_sample_images_from_episode, parse_state_from_episode, run_act_once,
+    ActEngine, ActInputs,
+};
 use inference_rs::benchmark::{run_benchmark, BenchmarkConfig, BenchmarkReport};
 use inference_rs::engine::Engine;
 use inference_rs::labels::parse_labels_from_model_xml;
@@ -27,8 +31,9 @@ struct Args {
     weights: PathBuf,
 
     /// Path to the input image (JPEG, PNG, …).
+    /// Required for classify/detect/benchmark. Not used for --task act.
     #[arg(long)]
-    image: PathBuf,
+    image: Option<PathBuf>,
 
     /// Inference device.
     #[arg(long, default_value = "CPU")]
@@ -102,6 +107,14 @@ struct Args {
     /// - openvino: decode in Rust, delegate resize to OpenVINO preprocess pipeline.
     #[arg(long, value_enum, default_value_t = PreprocessBackend::Rust)]
     preprocess_backend: PreprocessBackend,
+
+    /// Path to ACT metadata YAML. Defaults to sibling metadata.yaml next to --model.
+    #[arg(long)]
+    metadata: Option<PathBuf>,
+
+    /// Episode directory used to source ACT sample inputs (state and camera stats/images).
+    #[arg(long)]
+    episode_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -109,6 +122,7 @@ enum Task {
     Classify,
     Detect,
     Benchmark,
+    Act,
 }
 
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
@@ -182,6 +196,18 @@ struct BenchmarkJsonOutput {
     config: BenchmarkConfig,
     report: BenchmarkReport,
     stage_timing: Option<StageTimingReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct ActJsonOutput {
+    task: &'static str,
+    model: String,
+    metadata: String,
+    episode_dir: String,
+    state_dim: usize,
+    chunk_size: usize,
+    action_dim: usize,
+    actions: Vec<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -329,6 +355,7 @@ fn write_benchmark_json(
 
 fn run_stage_timing(
     args: &Args,
+    image_path: &PathBuf,
     engine: &mut Engine,
     labels: &[String],
 ) -> Result<Option<StageTimingReport>> {
@@ -346,8 +373,8 @@ fn run_stage_timing(
         None
     } else {
         let t = Instant::now();
-        let img = image::open(&args.image)
-            .with_context(|| format!("failed to open image: {}", args.image.display()))?;
+        let img = image::open(image_path)
+            .with_context(|| format!("failed to open image: {}", image_path.display()))?;
         let rgb = img.to_rgb8();
         io_decode_ms_sum += t.elapsed().as_secs_f64() * 1000.0;
         Some(rgb)
@@ -360,8 +387,8 @@ fn run_stage_timing(
 
         let tensor = if args.benchmark_stage_read_each_iter {
             let t = Instant::now();
-            let img = image::open(&args.image)
-                .with_context(|| format!("failed to open image: {}", args.image.display()))?;
+            let img = image::open(image_path)
+                .with_context(|| format!("failed to open image: {}", image_path.display()))?;
             let src_rgb = img.to_rgb8();
             io_decode_ms_sum += t.elapsed().as_secs_f64() * 1000.0;
 
@@ -495,28 +522,113 @@ fn main() -> Result<()> {
     openvino_sys::library::load()
         .map_err(|e| anyhow::anyhow!("failed to load OpenVINO shared library: {e}"))?;
 
-    // Validate paths early.
+    // Validate model paths early.
     if !args.model.exists() {
         bail!("model file not found: {}", args.model.display());
     }
     if !args.weights.exists() {
         bail!("weights file not found: {}", args.weights.display());
     }
-    if !args.image.exists() {
-        bail!("image file not found: {}", args.image.display());
+
+    if matches!(args.task, Task::Act) {
+        let episode_dir = args
+            .episode_dir
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--episode-dir is required for --task act"))?;
+        if !episode_dir.exists() {
+            bail!("episode directory not found: {}", episode_dir.display());
+        }
+
+        let metadata_path = args
+            .metadata
+            .clone()
+            .unwrap_or_else(|| args.model.with_file_name("metadata.yaml"));
+        if !metadata_path.exists() {
+            bail!("ACT metadata file not found: {}", metadata_path.display());
+        }
+
+        let act_meta = load_metadata(&metadata_path, &args.model)?;
+
+        eprintln!(
+            "Loading ACT model: {} (device: {})",
+            args.model.display(),
+            args.device
+        );
+        let mut act_engine = ActEngine::new(&args.model, &args.weights, &args.device)?;
+
+        let state = parse_state_from_episode(&episode_dir.join("data.jsonl"))?;
+        let images = load_sample_images_from_episode(
+            episode_dir,
+            act_meta.image_width,
+            act_meta.image_height,
+        )?;
+        let gripper = images
+            .get("gripper")
+            .ok_or_else(|| anyhow::anyhow!("missing gripper image sample"))?
+            .clone();
+        let overview = images
+            .get("overview")
+            .ok_or_else(|| anyhow::anyhow!("missing overview image sample"))?
+            .clone();
+
+        let act_inputs = ActInputs {
+            state,
+            gripper_image: gripper,
+            overview_image: overview,
+        };
+
+        let out = run_act_once(&mut act_engine, &act_meta, &act_inputs)?;
+
+        println!(
+            "ACT output: chunk_size={}, action_dim={}",
+            out.chunk_size, out.action_dim
+        );
+        for (i, a) in out.actions.iter().take(10).enumerate() {
+            println!("step[{i:03}] = {:?}", a);
+        }
+        if out.actions.len() > 10 {
+            println!("... ({} more actions)", out.actions.len() - 10);
+        }
+
+        if let Some(ref output_path) = args.output_json {
+            let payload = ActJsonOutput {
+                task: "act",
+                model: args.model.display().to_string(),
+                metadata: metadata_path.display().to_string(),
+                episode_dir: episode_dir.display().to_string(),
+                state_dim: act_meta.state_dim,
+                chunk_size: out.chunk_size,
+                action_dim: out.action_dim,
+                actions: out.actions,
+            };
+            let json =
+                serde_json::to_string_pretty(&payload).context("failed to serialize ACT JSON")?;
+            write_json_file(output_path, &json, "act")?;
+            eprintln!("ACT JSON saved to: {}", output_path.display());
+        }
+
+        return Ok(());
+    }
+
+    let image_path = args
+        .image
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--image is required for this task"))?;
+    if !image_path.exists() {
+        bail!("image file not found: {}", image_path.display());
     }
 
     eprintln!(
         "Loading image: {} (target {}x{}, preprocess backend: {:?})",
-        args.image.display(),
+        image_path.display(),
         args.width,
         args.height,
         args.preprocess_backend,
     );
 
     let tensor = match args.preprocess_backend {
-        PreprocessBackend::Rust => load_image(&args.image, args.width, args.height)?,
-        PreprocessBackend::Openvino => load_image_no_resize(&args.image)?,
+        PreprocessBackend::Rust => load_image(image_path, args.width, args.height)?,
+        PreprocessBackend::Openvino => load_image_no_resize(image_path)?,
     };
 
     eprintln!(
@@ -563,7 +675,7 @@ fn main() -> Result<()> {
                     &results,
                     &labels,
                     args.top_k,
-                    &args.image,
+                    image_path,
                     &args.model,
                     args.width,
                     args.height,
@@ -637,7 +749,7 @@ fn main() -> Result<()> {
             // If --output-image was specified, draw bounding boxes on the original image.
             if let Some(ref output_path) = args.output_image {
                 draw_detections(
-                    &args.image,
+                    image_path,
                     output_path,
                     &detections,
                     &labels,
@@ -654,7 +766,7 @@ fn main() -> Result<()> {
                     &labels,
                     &args.detection_format,
                     args.threshold,
-                    &args.image,
+                    image_path,
                     &args.model,
                     args.width,
                     args.height,
@@ -680,7 +792,7 @@ fn main() -> Result<()> {
             );
 
             let report = run_benchmark(&mut engine, &tensor, &cfg)?;
-            let stage_timing = run_stage_timing(&args, &mut engine, &labels)?;
+            let stage_timing = run_stage_timing(&args, image_path, &mut engine, &labels)?;
 
             println!("Benchmark results");
             println!("-----------------");
@@ -729,7 +841,7 @@ fn main() -> Result<()> {
                     &report,
                     stage_timing,
                     &cfg,
-                    &args.image,
+                    image_path,
                     &args.model,
                     &args.device,
                     args.preprocess_backend,
@@ -738,6 +850,9 @@ fn main() -> Result<()> {
                 )?;
                 eprintln!("Benchmark JSON saved to: {}", output_path.display());
             }
+        }
+        Task::Act => {
+            bail!("internal error: ACT task should have returned earlier");
         }
     }
 

@@ -1,7 +1,8 @@
 # inference-rs
 
 Vision model inference in Rust using [OpenVINO](https://docs.openvino.ai/).
-Supports image classification, object detection (Geti/OTX, SSD, YOLO output formats), and benchmark mode.
+Supports image classification, object detection (Geti/OTX, SSD, YOLO output formats), benchmark mode,
+and ACT policy inference for Physical AI Studio OpenVINO exports.
 
 The entire build and runtime environment is Dockerized — **only Docker is required** on the host machine.
 
@@ -212,6 +213,14 @@ Run inference directly:
   --threshold 0.3 \
   --width 992 \
   --height 800
+
+# ACT policy inference (OpenVINO export package)
+./standalone/run-inference.sh \
+  --task act \
+  --model models/act-openvino/act.xml \
+  --weights models/act-openvino/act.bin \
+  --episode-dir episodes/ep_000_dc7198bd \
+  --output-json output/act-output-standalone.json
 ```
 
 The `standalone/` directory is portable — you can tar it up and copy it to
@@ -226,14 +235,16 @@ inference-rs — Run vision-model inference with OpenVINO
 Options:
   --model <PATH>               Path to the OpenVINO IR model (.xml)
   --weights <PATH>             Path to the OpenVINO IR weights (.bin)
-  --image <PATH>               Path to the input image
+  --image <PATH>               Path to the input image (required for classify/detect/benchmark)
   --device <DEVICE>            Inference device [default: CPU]
-  --task <TASK>                classify | detect | benchmark [default: classify]
+  --task <TASK>                classify | detect | benchmark | act [default: classify]
   --top-k <N>                  Top-K results for classification [default: 5]
   --threshold <F>              Confidence threshold for detection [default: 0.5]
   --width <PX>                 Model input width [default: 224]
   --height <PX>                Model input height [default: 224]
   --preprocess-backend <BACK>  rust | openvino [default: rust]
+  --metadata <PATH>            Path to ACT metadata.yaml (optional; defaults next to --model)
+  --episode-dir <PATH>         Episode directory with data.jsonl and stats/images (ACT only)
   --detection-format <FMT>     geti | ssd | yolo [default: geti]
   --num-classes <N>            Number of classes (YOLO only) [default: 80]
   --output-image <PATH>        Save annotated detection image
