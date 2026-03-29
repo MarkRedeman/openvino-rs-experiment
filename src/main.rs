@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
+use openvino::Core;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -34,11 +35,11 @@ use inference_rs::visualization::draw_detections;
 #[command(name = "inference-rs", version, about)]
 struct Args {
     /// Path to the OpenVINO IR model definition (.xml).
-    #[arg(long)]
+    #[arg(long, required_unless_present = "list_devices")]
     model: PathBuf,
 
     /// Path to the OpenVINO IR weights (.bin).
-    #[arg(long)]
+    #[arg(long, required_unless_present = "list_devices")]
     weights: PathBuf,
 
     /// Path to the input image (JPEG, PNG, …).
@@ -49,6 +50,10 @@ struct Args {
     /// Inference device.
     #[arg(long, default_value = "CPU")]
     device: String,
+
+    /// List available OpenVINO devices and exit.
+    #[arg(long, default_value_t = false)]
+    list_devices: bool,
 
     /// Task to perform.
     #[arg(long, value_enum, default_value_t = Task::Classify)]
@@ -427,6 +432,24 @@ fn main() -> Result<()> {
     // Must happen before *any* openvino call, including Tensor::new().
     openvino_sys::library::load()
         .map_err(|e| anyhow::anyhow!("failed to load OpenVINO shared library: {e}"))?;
+
+    if args.list_devices {
+        let core = Core::new().context("failed to initialise OpenVINO core")?;
+        let devices = core
+            .available_devices()
+            .context("failed to query available OpenVINO devices")?;
+
+        if devices.is_empty() {
+            println!("No OpenVINO devices found.");
+        } else {
+            println!("Available OpenVINO devices:");
+            for device in devices {
+                println!("- {device}");
+            }
+        }
+
+        return Ok(());
+    }
 
     // Validate model paths early.
     if !args.model.exists() {

@@ -254,6 +254,73 @@ docker run --rm \
   --benchmark-stage-read-each-iter
 ```
 
+### Device selection (CPU, GPU/XPU, NPU, AUTO)
+
+OpenVINO device selection is controlled with `--device`.
+
+- `CPU` — CPU plugin
+- `GPU` — Intel GPU plugin (covers iGPU and Arc/dGPU; OpenVINO does not use `XPU` as a device string)
+- `NPU` — Intel NPU plugin
+- `AUTO` — automatic plugin selection
+- Advanced strings are passed through as-is, for example: `GPU.0`, `AUTO:GPU,CPU`, `MULTI:GPU,CPU`, `HETERO:GPU,CPU`
+
+List available devices at runtime:
+
+```bash
+docker run --rm inference-rs-inference --list-devices
+```
+
+GPU example (`docker run`):
+
+```bash
+docker run --rm \
+  --device /dev/dri:/dev/dri \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  inference-rs-inference \
+  --model /models/card-classification/model.xml \
+  --weights /models/card-classification/model.bin \
+  --image /images/diamond-card.jpg \
+  --task classify \
+  --top-k 4 \
+  --device GPU
+```
+
+NPU example (`docker run`):
+
+```bash
+docker run --rm \
+  --device /dev/accel/accel0:/dev/accel/accel0 \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  inference-rs-inference \
+  --model /models/card-classification/model.xml \
+  --weights /models/card-classification/model.bin \
+  --image /images/diamond-card.jpg \
+  --task classify \
+  --top-k 4 \
+  --device NPU
+```
+
+The included `docker-compose.yml` also provides:
+
+- `inference` (CPU)
+- `inference-gpu` (passes through `/dev/dri`)
+- `inference-npu` (passes through `/dev/accel/accel0`)
+
+Host requirements summary:
+
+| Device | Linux host requirements |
+|--------|-------------------------|
+| GPU | Intel GPU drivers/runtime (`intel-opencl-icd`, `intel-level-zero-gpu`, `level-zero`) and access to render device nodes (`render` group) |
+| NPU | Intel NPU driver stack (`intel-level-zero-npu`, `intel-driver-compiler-npu`), kernel support (typically 6.6+), and render/accel device node access |
+
+Standalone note:
+
+- `Dockerfile.standalone` always bundles CPU/AUTO/HETERO plugins.
+- It now also attempts to bundle GPU and NPU plugins when present in the OpenVINO runtime image.
+- Hardware-specific host drivers are still required on the target machine.
+
 ### Standalone build (run without Docker)
 
 You can compile the binary inside Docker, then extract it alongside the required
@@ -357,12 +424,15 @@ Output files:
 
 For a detailed ACT code walkthrough (model load, episode load, camera mapping, inference, and output shape), see `README-act-inference.md`.
 
+For accelerator troubleshooting (NPU setup, iGPU vs discrete Arc selection, Docker passthrough), see `README-device-troubleshooting.md`.
+
 ### CLI reference
 
 ```
 inference-rs — Run vision-model inference with OpenVINO
 
 Options:
+  --list-devices              List available OpenVINO devices and exit
   --model <PATH>               Path to the OpenVINO IR model (.xml)
   --weights <PATH>             Path to the OpenVINO IR weights (.bin)
   --image <PATH>               Path to the input image (required for classify/detect/benchmark)

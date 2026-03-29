@@ -73,6 +73,12 @@ RUN cp -P ${OV_TBB}/libtbb.so*           /standalone/lib/ && \
 # CPU plugin — required for --device CPU.
 RUN cp -P ${OV_LIB}/libopenvino_intel_cpu_plugin.so /standalone/lib/
 
+# GPU plugin — required for --device GPU (if available in the runtime image).
+RUN cp -P ${OV_LIB}/libopenvino_intel_gpu_plugin.so /standalone/lib/ 2>/dev/null || true
+
+# NPU plugin — required for --device NPU (if available in the runtime image).
+RUN cp -P ${OV_LIB}/libopenvino_intel_npu_plugin.so /standalone/lib/ 2>/dev/null || true
+
 # AUTO/HETERO plugins — OpenVINO may probe these even with explicit CPU device.
 RUN cp -P ${OV_LIB}/libopenvino_auto_plugin.so        /standalone/lib/ && \
     cp -P ${OV_LIB}/libopenvino_hetero_plugin.so       /standalone/lib/ && \

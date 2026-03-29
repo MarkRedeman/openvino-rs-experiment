@@ -15,3 +15,37 @@ services:
       --width 224
       --height 224
       --device CPU
+
+  inference-gpu:
+    build: .
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./models:/models:ro
+      - ./images:/images:ro
+    command: >
+      --model /models/card-classification/model.xml
+      --weights /models/card-classification/model.bin
+      --image /images/diamond-card.jpg
+      --task classify
+      --top-k 4
+      --width 224
+      --height 224
+      --device GPU
+
+  inference-npu:
+    build: .
+    devices:
+      - /dev/accel/accel0:/dev/accel/accel0
+    volumes:
+      - ./models:/models:ro
+      - ./images:/images:ro
+    command: >
+      --model /models/card-classification/model.xml
+      --weights /models/card-classification/model.bin
+      --image /images/diamond-card.jpg
+      --task classify
+      --top-k 4
+      --width 224
+      --height 224
+      --device NPU
