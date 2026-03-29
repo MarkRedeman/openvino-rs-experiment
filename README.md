@@ -12,6 +12,16 @@ The entire build and runtime environment is Dockerized — **only Docker is requ
 - OpenVINO IR model files (`.xml` + `.bin`)
 - Input image(s) (JPEG, PNG, etc.)
 
+## Code structure
+
+The codebase follows a lightweight hexagonal split:
+
+- `src/domain/` — core model abstraction (`InferenceModel`), shared input/output types, domain errors
+- `src/models/` — adapters for concrete runtimes (`VisionModel`, `ActModel`) + enum-dispatched `ModelWrapper` + `ModelRegistry` (`load/get/unload`)
+- `src/infra/` — shared infra utilities (device parsing, tensor buffer casting)
+- `src/output.rs` — JSON output payloads/writers for CLI tasks
+- `src/main.rs` — CLI/bootstrap orchestration
+
 ## Project structure
 
 ```
@@ -25,9 +35,14 @@ inference-rs/
 ├── fonts/
 │   └── DejaVuSans.ttf         # Embedded font for detection label rendering
 ├── src/
-│   ├── main.rs                # CLI entry point (clap)
-│   ├── lib.rs                 # Module re-exports
-│   ├── engine.rs              # OpenVINO Core lifecycle, infer / infer_multi
+│   ├── main.rs                # CLI entry point and app bootstrap
+│   ├── lib.rs                 # Module exports
+│   ├── domain/                # Inference domain API (trait/types/errors)
+│   ├── models/                # Vision/ACT model adapters + registry
+│   ├── infra/                 # Shared infra helpers
+│   ├── output.rs              # JSON output serialization/writing
+│   ├── engine.rs              # OpenVINO vision engine internals
+│   ├── act.rs                 # OpenVINO ACT engine internals
 │   ├── preprocessing.rs       # Image load, resize, normalize → NHWC f32 Tensor
 │   ├── postprocessing.rs      # top-K classification, SSD/YOLO/Geti detection decoding
 │   ├── benchmark.rs           # Throughput/latency benchmark runner
@@ -46,6 +61,68 @@ This runs a multi-stage Docker build:
 
 1. **Stage 1** (`openvino/ubuntu24_dev:2026.0.0`) — installs the Rust toolchain and compiles the binary.
 2. **Stage 2** (`openvino/ubuntu24_runtime:2026.0.0`) — copies just the binary into a slim runtime image with OpenVINO shared libraries.
+
+## Most common build/run examples
+
+```bash
+# 1) Build image once
+docker compose build
+
+# 2) Classification
+docker run --rm \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  inference-rs-inference \
+  --model /models/card-classification/model.xml \
+  --weights /models/card-classification/model.bin \
+  --image /images/diamond-card.jpg \
+  --task classify \
+  --top-k 4 \
+  --width 224 \
+  --height 224
+
+# 3) Detection (Geti format) + annotated image
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  -v ./output:/output \
+  inference-rs-inference \
+  --model /models/fish-detection/model.xml \
+  --weights /models/fish-detection/model.bin \
+  --image /images/fish.png \
+  --task detect \
+  --detection-format geti \
+  --threshold 0.5 \
+  --width 992 \
+  --height 800 \
+  --output-image /output/fish-detected.png
+
+# 4) ACT single run + JSON output
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v ./models:/models:ro \
+  -v ./episodes:/episodes:ro \
+  -v ./output:/output \
+  inference-rs-inference \
+  --task act \
+  --model /models/act-openvino/act.xml \
+  --weights /models/act-openvino/act.bin \
+  --episode-dir /episodes/ep_000_dc7198bd \
+  --output-json /output/act-output.json
+
+# 5) Vision benchmark
+docker run --rm \
+  -v ./models:/models:ro \
+  -v ./images:/images:ro \
+  inference-rs-inference \
+  --model /models/card-classification/model.xml \
+  --weights /models/card-classification/model.bin \
+  --image /images/diamond-card.jpg \
+  --task benchmark \
+  --width 224 \
+  --height 224 \
+  --benchmark-warmup 20 \
+  --benchmark-duration 10
+```
 
 
 
