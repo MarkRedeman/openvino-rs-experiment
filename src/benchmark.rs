@@ -40,8 +40,15 @@ pub fn run_benchmark(
 ) -> Result<BenchmarkReport> {
     let mut request = engine.create_request()?;
 
+    run_benchmark_loop(cfg, || engine.run_request(&mut request, tensor))
+}
+
+pub fn run_benchmark_loop<F>(cfg: &BenchmarkConfig, mut step: F) -> Result<BenchmarkReport>
+where
+    F: FnMut() -> Result<()>,
+{
     for _ in 0..cfg.warmup_iters {
-        engine.run_request(&mut request, tensor)?;
+        step()?;
     }
 
     let mut latencies_us: Vec<u64> = Vec::new();
@@ -59,7 +66,7 @@ pub fn run_benchmark(
         }
 
         let iter_start = Instant::now();
-        engine.run_request(&mut request, tensor)?;
+        step()?;
         let elapsed = iter_start.elapsed();
         latencies_us.push(duration_to_micros(elapsed));
         measured_iters += 1;

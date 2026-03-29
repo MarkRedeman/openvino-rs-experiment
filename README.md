@@ -47,6 +47,8 @@ This runs a multi-stage Docker build:
 1. **Stage 1** (`openvino/ubuntu24_dev:2026.0.0`) — installs the Rust toolchain and compiles the binary.
 2. **Stage 2** (`openvino/ubuntu24_runtime:2026.0.0`) — copies just the binary into a slim runtime image with OpenVINO shared libraries.
 
+
+
 ## Usage
 
 ### Quick start with docker compose
@@ -221,11 +223,58 @@ Run inference directly:
   --weights models/act-openvino/act.bin \
   --episode-dir episodes/ep_000_dc7198bd \
   --output-json output/act-output-standalone.json
+
+# ACT benchmark mode (reuses one loaded model/request)
+./standalone/run-inference.sh \
+  --task act-benchmark \
+  --model models/act-openvino/act.xml \
+  --weights models/act-openvino/act.bin \
+  --episode-dir episodes/ep_000_dc7198bd \
+  --benchmark-warmup 20 \
+  --benchmark-duration 10 \
+  --benchmark-report-every 1 \
+  --output-json output/act-benchmark.json
 ```
 
 The `standalone/` directory is portable — you can tar it up and copy it to
 another machine. The only requirement is a compatible x86_64 Linux with glibc
 (Ubuntu 22.04+, Debian 12+, RHEL 9+, etc.).
+
+### ACT benchmark mode
+
+`--task act-benchmark` benchmarks ACT inference while reusing a single loaded model
+and inference request (same strategy as vision benchmark mode). It reports:
+
+- mean/min/max latency (ms)
+- p50/p90/p95/p99 latency (ms)
+- approximate throughput (runs/sec)
+- optional rough stage timing breakdown (I/O+decode, preprocess, inference, postprocess)
+
+Example:
+
+```bash
+./standalone/run-inference.sh \
+  --task act-benchmark \
+  --model ./models/act-openvino/act.xml \
+  --weights ./models/act-openvino/act.bin \
+  --episode-dir ./episodes/ep_000_dc7198bd \
+  --benchmark-warmup 20 \
+  --benchmark-iters 100 \
+  --benchmark-report-every 1 \
+  --benchmark-stage-iters 30 \
+  --benchmark-stage-read-each-iter \
+  --output-json ./output/act-benchmark.json
+```
+
+Notes:
+
+- Set `--benchmark-stage-iters 0` to disable stage timing.
+- With `--benchmark-stage-read-each-iter`, stage timing includes re-reading episode inputs each iteration.
+- Without it, stage timing reuses prebuilt tensors (similar to throughput loop) and mostly isolates inference cost.
+
+Output files:
+
+- `output/act-benchmark.json` (if `--output-json` is set)
 
 ### CLI reference
 
@@ -237,7 +286,7 @@ Options:
   --weights <PATH>             Path to the OpenVINO IR weights (.bin)
   --image <PATH>               Path to the input image (required for classify/detect/benchmark)
   --device <DEVICE>            Inference device [default: CPU]
-  --task <TASK>                classify | detect | benchmark | act [default: classify]
+  --task <TASK>                classify | detect | benchmark | act | act-benchmark [default: classify]
   --top-k <N>                  Top-K results for classification [default: 5]
   --threshold <F>              Confidence threshold for detection [default: 0.5]
   --width <PX>                 Model input width [default: 224]

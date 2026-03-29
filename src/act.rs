@@ -28,6 +28,19 @@ impl ActEngine {
             .create_infer_request()
             .context("failed to create ACT infer request")
     }
+
+    pub fn run_request(&self, request: &mut InferRequest, tensors: &ActInputTensors) -> Result<()> {
+        request
+            .set_tensor("state", &tensors.state)
+            .context("failed to set ACT input 'state'")?;
+        request
+            .set_tensor("images.gripper", &tensors.gripper)
+            .context("failed to set ACT input 'images.gripper'")?;
+        request
+            .set_tensor("images.overview", &tensors.overview)
+            .context("failed to set ACT input 'images.overview'")?;
+        request.infer().context("ACT inference failed")
+    }
 }
 
 fn parse_device(device: &str) -> DeviceType<'static> {
@@ -59,6 +72,12 @@ pub struct ActInputs {
     pub state: Vec<f32>,
     pub gripper_image: RgbImage,
     pub overview_image: RgbImage,
+}
+
+pub struct ActInputTensors {
+    pub state: Tensor,
+    pub gripper: Tensor,
+    pub overview: Tensor,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -216,30 +235,22 @@ fn image_to_nchw_tensor(img: &RgbImage, width: u32, height: u32) -> Result<Tenso
     Ok(tensor)
 }
 
-pub fn run_act_once(
-    engine: &mut ActEngine,
+pub fn prepare_act_input_tensors(
     meta: &ActMetadata,
     inputs: &ActInputs,
-) -> Result<ActOutput> {
-    let state_tensor = state_to_tensor(&inputs.state, meta.state_dim)?;
-    let gripper_tensor =
-        image_to_nchw_tensor(&inputs.gripper_image, meta.image_width, meta.image_height)?;
-    let overview_tensor =
-        image_to_nchw_tensor(&inputs.overview_image, meta.image_width, meta.image_height)?;
+) -> Result<ActInputTensors> {
+    Ok(ActInputTensors {
+        state: state_to_tensor(&inputs.state, meta.state_dim)?,
+        gripper: image_to_nchw_tensor(&inputs.gripper_image, meta.image_width, meta.image_height)?,
+        overview: image_to_nchw_tensor(
+            &inputs.overview_image,
+            meta.image_width,
+            meta.image_height,
+        )?,
+    })
+}
 
-    let mut request: InferRequest = engine.create_request()?;
-    request
-        .set_tensor("state", &state_tensor)
-        .context("failed to set ACT input 'state'")?;
-    request
-        .set_tensor("images.gripper", &gripper_tensor)
-        .context("failed to set ACT input 'images.gripper'")?;
-    request
-        .set_tensor("images.overview", &overview_tensor)
-        .context("failed to set ACT input 'images.overview'")?;
-
-    request.infer().context("ACT inference failed")?;
-
+pub fn read_act_output(request: &InferRequest, meta: &ActMetadata) -> Result<ActOutput> {
     let output_tensor = request
         .get_tensor("action")
         .context("failed to retrieve ACT output tensor 'action'")?;
@@ -267,6 +278,17 @@ pub fn run_act_once(
         action_dim: meta.action_dim,
         actions,
     })
+}
+
+pub fn run_act_once(
+    engine: &mut ActEngine,
+    meta: &ActMetadata,
+    inputs: &ActInputs,
+) -> Result<ActOutput> {
+    let tensors = prepare_act_input_tensors(meta, inputs)?;
+    let mut request: InferRequest = engine.create_request()?;
+    engine.run_request(&mut request, &tensors)?;
+    read_act_output(&request, meta)
 }
 
 pub fn parse_state_from_episode(data_jsonl: &Path) -> Result<Vec<f32>> {

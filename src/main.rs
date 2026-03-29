@@ -6,10 +6,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use inference_rs::act::{
-    load_metadata, load_sample_images_from_episode, parse_state_from_episode, run_act_once,
-    ActEngine, ActInputs,
+    load_metadata, load_sample_images_from_episode, parse_state_from_episode,
+    prepare_act_input_tensors, read_act_output, run_act_once, ActEngine, ActInputTensors,
+    ActInputs,
 };
-use inference_rs::benchmark::{run_benchmark, BenchmarkConfig, BenchmarkReport};
+use inference_rs::benchmark::{
+    run_benchmark, run_benchmark_loop, BenchmarkConfig, BenchmarkReport,
+};
 use inference_rs::engine::Engine;
 use inference_rs::labels::parse_labels_from_model_xml;
 use inference_rs::postprocessing::{
@@ -123,6 +126,7 @@ enum Task {
     Detect,
     Benchmark,
     Act,
+    ActBenchmark,
 }
 
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
@@ -208,6 +212,20 @@ struct ActJsonOutput {
     chunk_size: usize,
     action_dim: usize,
     actions: Vec<Vec<f32>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ActBenchmarkJsonOutput {
+    task: &'static str,
+    model: String,
+    metadata: String,
+    episode_dir: String,
+    device: String,
+    config: BenchmarkConfig,
+    report: BenchmarkReport,
+    stage_timing: Option<StageTimingReport>,
+    output_chunk_size: usize,
+    output_action_dim: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -514,6 +532,112 @@ fn run_stage_timing(
     }))
 }
 
+fn run_act_stage_timing(
+    args: &Args,
+    engine: &mut ActEngine,
+    meta: &inference_rs::act::ActMetadata,
+    episode_dir: &PathBuf,
+    inputs: &ActInputs,
+) -> Result<Option<StageTimingReport>> {
+    if args.benchmark_stage_iters == 0 {
+        return Ok(None);
+    }
+
+    let mut io_decode_ms_sum = 0.0f64;
+    let mut preprocess_ms_sum = 0.0f64;
+    let mut inference_ms_sum = 0.0f64;
+    let mut postprocess_ms_sum = 0.0f64;
+    let mut total_ms_sum = 0.0f64;
+
+    let prebuilt: Option<ActInputTensors> = if args.benchmark_stage_read_each_iter {
+        None
+    } else {
+        let t = Instant::now();
+        let tensors = prepare_act_input_tensors(meta, inputs)?;
+        preprocess_ms_sum += t.elapsed().as_secs_f64() * 1000.0;
+        Some(tensors)
+    };
+
+    let mut request = engine.create_request()?;
+
+    for _ in 0..args.benchmark_stage_iters {
+        let total_start = Instant::now();
+
+        if args.benchmark_stage_read_each_iter {
+            let t0 = Instant::now();
+            let state = parse_state_from_episode(&episode_dir.join("data.jsonl"))?;
+            let images =
+                load_sample_images_from_episode(episode_dir, meta.image_width, meta.image_height)?;
+            let gripper = images
+                .get("gripper")
+                .ok_or_else(|| anyhow::anyhow!("stage timing: missing gripper image sample"))?
+                .clone();
+            let overview = images
+                .get("overview")
+                .ok_or_else(|| anyhow::anyhow!("stage timing: missing overview image sample"))?
+                .clone();
+            let local_inputs = ActInputs {
+                state,
+                gripper_image: gripper,
+                overview_image: overview,
+            };
+            io_decode_ms_sum += t0.elapsed().as_secs_f64() * 1000.0;
+
+            let t1 = Instant::now();
+            let tensors = prepare_act_input_tensors(meta, &local_inputs)?;
+            preprocess_ms_sum += t1.elapsed().as_secs_f64() * 1000.0;
+            let t2 = Instant::now();
+            engine.run_request(&mut request, &tensors)?;
+            let t3 = Instant::now();
+            let _ = read_act_output(&request, meta)?;
+            let t4 = Instant::now();
+
+            inference_ms_sum += (t3 - t2).as_secs_f64() * 1000.0;
+            postprocess_ms_sum += (t4 - t3).as_secs_f64() * 1000.0;
+        } else {
+            let t1 = Instant::now();
+            let tensors = prebuilt
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("stage timing: missing prebuilt ACT tensors"))?;
+            preprocess_ms_sum += t1.elapsed().as_secs_f64() * 1000.0;
+            let t2 = Instant::now();
+            engine.run_request(&mut request, tensors)?;
+            let t3 = Instant::now();
+            let _ = read_act_output(&request, meta)?;
+            let t4 = Instant::now();
+
+            inference_ms_sum += (t3 - t2).as_secs_f64() * 1000.0;
+            postprocess_ms_sum += (t4 - t3).as_secs_f64() * 1000.0;
+        }
+
+        total_ms_sum += total_start.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    let n = args.benchmark_stage_iters as f64;
+    let io_decode_mean_ms = io_decode_ms_sum / n;
+    let preprocess_mean_ms = preprocess_ms_sum / n;
+    let inference_mean_ms = inference_ms_sum / n;
+    let postprocess_mean_ms = postprocess_ms_sum / n;
+    let total_mean_ms = total_ms_sum / n;
+
+    let denom = (io_decode_mean_ms + preprocess_mean_ms + inference_mean_ms + postprocess_mean_ms)
+        .max(1e-9);
+
+    Ok(Some(StageTimingReport {
+        iterations: args.benchmark_stage_iters,
+        stage_read_each_iter: args.benchmark_stage_read_each_iter,
+        io_decode_mean_ms,
+        preprocess_mean_ms,
+        inference_mean_ms,
+        postprocess_mean_ms,
+        total_mean_ms,
+        io_decode_share_pct: io_decode_mean_ms * 100.0 / denom,
+        preprocess_share_pct: preprocess_mean_ms * 100.0 / denom,
+        inference_share_pct: inference_mean_ms * 100.0 / denom,
+        postprocess_share_pct: postprocess_mean_ms * 100.0 / denom,
+    }))
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -530,7 +654,7 @@ fn main() -> Result<()> {
         bail!("weights file not found: {}", args.weights.display());
     }
 
-    if matches!(args.task, Task::Act) {
+    if matches!(args.task, Task::Act | Task::ActBenchmark) {
         let episode_dir = args
             .episode_dir
             .as_ref()
@@ -577,34 +701,115 @@ fn main() -> Result<()> {
             overview_image: overview,
         };
 
-        let out = run_act_once(&mut act_engine, &act_meta, &act_inputs)?;
+        if matches!(args.task, Task::ActBenchmark) {
+            if args.benchmark_duration <= 0.0 && args.benchmark_iters.is_none() {
+                bail!("--benchmark-duration must be > 0 when --benchmark-iters is not set");
+            }
 
-        println!(
-            "ACT output: chunk_size={}, action_dim={}",
-            out.chunk_size, out.action_dim
-        );
-        for (i, a) in out.actions.iter().take(10).enumerate() {
-            println!("step[{i:03}] = {:?}", a);
-        }
-        if out.actions.len() > 10 {
-            println!("... ({} more actions)", out.actions.len() - 10);
-        }
-
-        if let Some(ref output_path) = args.output_json {
-            let payload = ActJsonOutput {
-                task: "act",
-                model: args.model.display().to_string(),
-                metadata: metadata_path.display().to_string(),
-                episode_dir: episode_dir.display().to_string(),
-                state_dim: act_meta.state_dim,
-                chunk_size: out.chunk_size,
-                action_dim: out.action_dim,
-                actions: out.actions,
+            let cfg = BenchmarkConfig {
+                warmup_iters: args.benchmark_warmup,
+                duration_secs: args.benchmark_duration,
+                max_iters: args.benchmark_iters,
+                report_every_secs: args.benchmark_report_every,
             };
-            let json =
-                serde_json::to_string_pretty(&payload).context("failed to serialize ACT JSON")?;
-            write_json_file(output_path, &json, "act")?;
-            eprintln!("ACT JSON saved to: {}", output_path.display());
+
+            let tensors = prepare_act_input_tensors(&act_meta, &act_inputs)?;
+            let mut request = act_engine.create_request()?;
+
+            let report =
+                run_benchmark_loop(&cfg, || act_engine.run_request(&mut request, &tensors))?;
+            let stage_timing =
+                run_act_stage_timing(&args, &mut act_engine, &act_meta, episode_dir, &act_inputs)?;
+
+            println!("ACT benchmark results");
+            println!("---------------------");
+            println!("Warmup iterations  : {}", report.warmup_iters);
+            println!("Measured iterations: {}", report.measured_iters);
+            println!("Measured time (s)  : {:.3}", report.measured_seconds);
+            println!("Throughput (run/s) : {:.3}", report.throughput_fps);
+            println!(
+                "Latency (ms)       : mean={:.3} min={:.3} p50={:.3} p90={:.3} p95={:.3} p99={:.3} max={:.3}",
+                report.latency.mean_ms,
+                report.latency.min_ms,
+                report.latency.p50_ms,
+                report.latency.p90_ms,
+                report.latency.p95_ms,
+                report.latency.p99_ms,
+                report.latency.max_ms,
+            );
+
+            if let Some(stage) = &stage_timing {
+                println!("\nStage timing (rough)");
+                println!("--------------------");
+                println!("Iterations          : {}", stage.iterations);
+                println!("Read each iter      : {}", stage.stage_read_each_iter);
+                println!(
+                    "IO+Decode (ms)      : {:.3} ({:.1}%)",
+                    stage.io_decode_mean_ms, stage.io_decode_share_pct
+                );
+                println!(
+                    "Preprocess (ms)     : {:.3} ({:.1}%)",
+                    stage.preprocess_mean_ms, stage.preprocess_share_pct
+                );
+                println!(
+                    "Inference (ms)      : {:.3} ({:.1}%)",
+                    stage.inference_mean_ms, stage.inference_share_pct
+                );
+                println!(
+                    "Postprocess (ms)    : {:.3} ({:.1}%)",
+                    stage.postprocess_mean_ms, stage.postprocess_share_pct
+                );
+                println!("Total (ms)          : {:.3}", stage.total_mean_ms);
+            }
+
+            if let Some(ref output_path) = args.output_json {
+                let payload = ActBenchmarkJsonOutput {
+                    task: "benchmark",
+                    model: args.model.display().to_string(),
+                    metadata: metadata_path.display().to_string(),
+                    episode_dir: episode_dir.display().to_string(),
+                    device: args.device.clone(),
+                    config: cfg,
+                    report,
+                    stage_timing,
+                    output_chunk_size: act_meta.chunk_size,
+                    output_action_dim: act_meta.action_dim,
+                };
+                let json = serde_json::to_string_pretty(&payload)
+                    .context("failed to serialize ACT benchmark JSON")?;
+                write_json_file(output_path, &json, "act benchmark")?;
+                eprintln!("ACT benchmark JSON saved to: {}", output_path.display());
+            }
+        } else {
+            let out = run_act_once(&mut act_engine, &act_meta, &act_inputs)?;
+
+            println!(
+                "ACT output: chunk_size={}, action_dim={}",
+                out.chunk_size, out.action_dim
+            );
+            for (i, a) in out.actions.iter().take(10).enumerate() {
+                println!("step[{i:03}] = {:?}", a);
+            }
+            if out.actions.len() > 10 {
+                println!("... ({} more actions)", out.actions.len() - 10);
+            }
+
+            if let Some(ref output_path) = args.output_json {
+                let payload = ActJsonOutput {
+                    task: "act",
+                    model: args.model.display().to_string(),
+                    metadata: metadata_path.display().to_string(),
+                    episode_dir: episode_dir.display().to_string(),
+                    state_dim: act_meta.state_dim,
+                    chunk_size: out.chunk_size,
+                    action_dim: out.action_dim,
+                    actions: out.actions,
+                };
+                let json = serde_json::to_string_pretty(&payload)
+                    .context("failed to serialize ACT JSON")?;
+                write_json_file(output_path, &json, "act")?;
+                eprintln!("ACT JSON saved to: {}", output_path.display());
+            }
         }
 
         return Ok(());
@@ -853,6 +1058,9 @@ fn main() -> Result<()> {
         }
         Task::Act => {
             bail!("internal error: ACT task should have returned earlier");
+        }
+        Task::ActBenchmark => {
+            bail!("internal error: ACT benchmark task should have returned earlier");
         }
     }
 
