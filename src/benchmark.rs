@@ -33,6 +33,21 @@ pub struct BenchmarkReport {
     pub latency: LatencyStats,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct StageTimingReport {
+    pub iterations: usize,
+    pub stage_read_each_iter: bool,
+    pub io_decode_mean_ms: f64,
+    pub preprocess_mean_ms: f64,
+    pub inference_mean_ms: f64,
+    pub postprocess_mean_ms: f64,
+    pub total_mean_ms: f64,
+    pub io_decode_share_pct: f64,
+    pub preprocess_share_pct: f64,
+    pub inference_share_pct: f64,
+    pub postprocess_share_pct: f64,
+}
+
 pub fn run_benchmark(
     engine: &mut Engine,
     tensor: &Tensor,

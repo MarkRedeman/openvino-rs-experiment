@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 use openvino::{
-    prepostprocess, CompiledModel, Core, DeviceType, ElementType, InferRequest, Layout, Model,
-    ResizeAlgorithm, Tensor,
+    CompiledModel, Core, ElementType, InferRequest, Layout, Model, ResizeAlgorithm, Tensor,
+    prepostprocess,
 };
 use std::collections::HashMap;
 use std::path::Path;
+
+use crate::infra::device::parse_device;
 
 /// Raw bytes read from an output tensor, together with its element type.
 #[derive(Debug, Clone)]
@@ -105,7 +107,7 @@ impl Engine {
             single_output,
         )?;
 
-        let device_type = Self::parse_device(device);
+        let device_type = parse_device(device);
         let compiled = core
             .compile_model(&new_model, device_type)
             .context("failed to compile model")?;
@@ -270,13 +272,5 @@ impl Engine {
 
         ppp.build_new_model()
             .context("failed to build preprocessed model")
-    }
-
-    fn parse_device(device: &str) -> DeviceType<'static> {
-        match device.to_uppercase().as_str() {
-            "CPU" => DeviceType::CPU,
-            "GPU" => DeviceType::GPU,
-            _ => DeviceType::CPU,
-        }
     }
 }

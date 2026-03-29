@@ -1,7 +1,12 @@
 pub mod act;
 pub mod benchmark;
+pub mod domain;
 pub mod engine;
+pub mod inbound;
+pub mod infra;
 pub mod labels;
+pub mod models;
+pub mod output;
 pub mod postprocessing;
 pub mod preprocessing;
 pub mod visualization;

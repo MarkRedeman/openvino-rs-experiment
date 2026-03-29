@@ -1,20 +1,28 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use serde::Serialize;
-use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use inference_rs::act::{
-    load_metadata, load_sample_images_from_episode, parse_state_from_episode,
-    prepare_act_input_tensors, read_act_output, run_act_once, ActEngine, ActInputTensors,
-    ActInputs,
+    ActEngine, ActInputTensors, ActInputs, load_metadata, load_sample_images_from_episode,
+    parse_state_from_episode, prepare_act_input_tensors, read_act_output,
 };
 use inference_rs::benchmark::{
-    run_benchmark, run_benchmark_loop, BenchmarkConfig, BenchmarkReport,
+    BenchmarkConfig, StageTimingReport, run_benchmark, run_benchmark_loop,
 };
+use inference_rs::domain::model::InferenceModel;
+use inference_rs::domain::types::{InferenceContext, InferenceInput, InferenceOutput, ModelType};
 use inference_rs::engine::Engine;
 use inference_rs::labels::parse_labels_from_model_xml;
+use inference_rs::models::act::ActModel;
+use inference_rs::models::model_wrapper::ModelWrapper;
+use inference_rs::models::registry::ModelRegistry;
+use inference_rs::models::vision::VisionModel;
+use inference_rs::output::{
+    write_act_benchmark_json, write_act_json, write_benchmark_json as write_benchmark_json_file,
+    write_classification_json as write_classification_json_file,
+    write_detection_json as write_detection_json_file,
+};
 use inference_rs::postprocessing::{
     decode_geti_detections, decode_ssd_detections, decode_yolo_detections, top_k_classifications,
 };
@@ -139,236 +147,10 @@ enum DetectionFormat {
     Yolo,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum PreprocessBackend {
     Rust,
     Openvino,
-}
-
-#[derive(Debug, Serialize)]
-struct DetectionJsonRecord {
-    class_id: usize,
-    label: Option<String>,
-    confidence: f32,
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-}
-
-#[derive(Debug, Serialize)]
-struct ClassificationJsonRecord {
-    class_id: usize,
-    label: Option<String>,
-    probability: f32,
-}
-
-#[derive(Debug, Serialize)]
-struct ClassificationJsonOutput {
-    task: &'static str,
-    top_k: usize,
-    image: String,
-    model: String,
-    model_input_width: u32,
-    model_input_height: u32,
-    count: usize,
-    results: Vec<ClassificationJsonRecord>,
-}
-
-#[derive(Debug, Serialize)]
-struct DetectionJsonOutput {
-    task: &'static str,
-    detection_format: String,
-    threshold: f32,
-    image: String,
-    model: String,
-    model_input_width: u32,
-    model_input_height: u32,
-    count: usize,
-    detections: Vec<DetectionJsonRecord>,
-}
-
-#[derive(Debug, Serialize)]
-struct BenchmarkJsonOutput {
-    task: &'static str,
-    image: String,
-    model: String,
-    device: String,
-    preprocess_backend: PreprocessBackend,
-    model_input_width: u32,
-    model_input_height: u32,
-    config: BenchmarkConfig,
-    report: BenchmarkReport,
-    stage_timing: Option<StageTimingReport>,
-}
-
-#[derive(Debug, Serialize)]
-struct ActJsonOutput {
-    task: &'static str,
-    model: String,
-    metadata: String,
-    episode_dir: String,
-    state_dim: usize,
-    chunk_size: usize,
-    action_dim: usize,
-    actions: Vec<Vec<f32>>,
-}
-
-#[derive(Debug, Serialize)]
-struct ActBenchmarkJsonOutput {
-    task: &'static str,
-    model: String,
-    metadata: String,
-    episode_dir: String,
-    device: String,
-    config: BenchmarkConfig,
-    report: BenchmarkReport,
-    stage_timing: Option<StageTimingReport>,
-    output_chunk_size: usize,
-    output_action_dim: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct StageTimingReport {
-    iterations: usize,
-    stage_read_each_iter: bool,
-    io_decode_mean_ms: f64,
-    preprocess_mean_ms: f64,
-    inference_mean_ms: f64,
-    postprocess_mean_ms: f64,
-    total_mean_ms: f64,
-    io_decode_share_pct: f64,
-    preprocess_share_pct: f64,
-    inference_share_pct: f64,
-    postprocess_share_pct: f64,
-}
-
-fn write_json_file(output_path: &PathBuf, content: &str, kind: &str) -> Result<()> {
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create {kind} JSON directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
-    }
-
-    fs::write(output_path, content).with_context(|| {
-        format!(
-            "failed to write {kind} JSON output: {}",
-            output_path.display()
-        )
-    })?;
-
-    Ok(())
-}
-
-fn write_classification_json(
-    output_path: &PathBuf,
-    results: &[inference_rs::postprocessing::Classification],
-    labels: &[String],
-    top_k: usize,
-    image_path: &PathBuf,
-    model_path: &PathBuf,
-    model_width: u32,
-    model_height: u32,
-) -> Result<()> {
-    let records = results
-        .iter()
-        .map(|c| ClassificationJsonRecord {
-            class_id: c.class_id,
-            label: labels.get(c.class_id).cloned(),
-            probability: c.probability,
-        })
-        .collect();
-
-    let payload = ClassificationJsonOutput {
-        task: "classify",
-        top_k,
-        image: image_path.display().to_string(),
-        model: model_path.display().to_string(),
-        model_input_width: model_width,
-        model_input_height: model_height,
-        count: results.len(),
-        results: records,
-    };
-
-    let json = serde_json::to_string_pretty(&payload)
-        .context("failed to serialize classification JSON")?;
-    write_json_file(output_path, &json, "classification")
-}
-
-fn write_detection_json(
-    output_path: &PathBuf,
-    detections: &[inference_rs::postprocessing::Detection],
-    labels: &[String],
-    detection_format: &DetectionFormat,
-    threshold: f32,
-    image_path: &PathBuf,
-    model_path: &PathBuf,
-    model_width: u32,
-    model_height: u32,
-) -> Result<()> {
-    let records = detections
-        .iter()
-        .map(|d| DetectionJsonRecord {
-            class_id: d.class_id,
-            label: labels.get(d.class_id).cloned(),
-            confidence: d.confidence,
-            x1: d.x1,
-            y1: d.y1,
-            x2: d.x2,
-            y2: d.y2,
-        })
-        .collect();
-
-    let payload = DetectionJsonOutput {
-        task: "detect",
-        detection_format: format!("{detection_format:?}").to_lowercase(),
-        threshold,
-        image: image_path.display().to_string(),
-        model: model_path.display().to_string(),
-        model_input_width: model_width,
-        model_input_height: model_height,
-        count: detections.len(),
-        detections: records,
-    };
-
-    let json =
-        serde_json::to_string_pretty(&payload).context("failed to serialize detection JSON")?;
-    write_json_file(output_path, &json, "detection")
-}
-
-fn write_benchmark_json(
-    output_path: &PathBuf,
-    report: &BenchmarkReport,
-    stage_timing: Option<StageTimingReport>,
-    cfg: &BenchmarkConfig,
-    image_path: &PathBuf,
-    model_path: &PathBuf,
-    device: &str,
-    preprocess_backend: PreprocessBackend,
-    model_width: u32,
-    model_height: u32,
-) -> Result<()> {
-    let payload = BenchmarkJsonOutput {
-        task: "benchmark",
-        image: image_path.display().to_string(),
-        model: model_path.display().to_string(),
-        device: device.to_string(),
-        preprocess_backend,
-        model_input_width: model_width,
-        model_input_height: model_height,
-        config: cfg.clone(),
-        report: report.clone(),
-        stage_timing,
-    };
-
-    let json =
-        serde_json::to_string_pretty(&payload).context("failed to serialize benchmark JSON")?;
-    write_json_file(output_path, &json, "benchmark")
 }
 
 fn run_stage_timing(
@@ -678,7 +460,17 @@ fn main() -> Result<()> {
             args.model.display(),
             args.device
         );
-        let mut act_engine = ActEngine::new(&args.model, &args.weights, &args.device)?;
+
+        let mut registry = ModelRegistry::new();
+        registry.load(
+            "act",
+            ModelWrapper::Act(ActModel::new(
+                &args.model,
+                &args.weights,
+                &args.device,
+                act_meta.clone(),
+            )?),
+        )?;
 
         let state = parse_state_from_episode(&episode_dir.join("data.jsonl"))?;
         let images = load_sample_images_from_episode(
@@ -713,13 +505,25 @@ fn main() -> Result<()> {
                 report_every_secs: args.benchmark_report_every,
             };
 
+            let act_model_wrapper = registry
+                .get_mut("act")
+                .ok_or_else(|| anyhow::anyhow!("ACT model not found in registry"))?;
+            let act_model = act_model_wrapper
+                .as_act_mut()
+                .ok_or_else(|| anyhow::anyhow!("registry model is not ACT"))?;
             let tensors = prepare_act_input_tensors(&act_meta, &act_inputs)?;
-            let mut request = act_engine.create_request()?;
+            let mut request = act_model.engine_mut().create_request()?;
 
-            let report =
-                run_benchmark_loop(&cfg, || act_engine.run_request(&mut request, &tensors))?;
-            let stage_timing =
-                run_act_stage_timing(&args, &mut act_engine, &act_meta, episode_dir, &act_inputs)?;
+            let report = run_benchmark_loop(&cfg, || {
+                act_model.engine_mut().run_request(&mut request, &tensors)
+            })?;
+            let stage_timing = run_act_stage_timing(
+                &args,
+                act_model.engine_mut(),
+                &act_meta,
+                episode_dir,
+                &act_inputs,
+            )?;
 
             println!("ACT benchmark results");
             println!("---------------------");
@@ -763,25 +567,31 @@ fn main() -> Result<()> {
             }
 
             if let Some(ref output_path) = args.output_json {
-                let payload = ActBenchmarkJsonOutput {
-                    task: "benchmark",
-                    model: args.model.display().to_string(),
-                    metadata: metadata_path.display().to_string(),
-                    episode_dir: episode_dir.display().to_string(),
-                    device: args.device.clone(),
-                    config: cfg,
+                write_act_benchmark_json(
+                    output_path,
+                    &args.model,
+                    &metadata_path,
+                    episode_dir,
+                    &args.device,
+                    cfg,
                     report,
                     stage_timing,
-                    output_chunk_size: act_meta.chunk_size,
-                    output_action_dim: act_meta.action_dim,
-                };
-                let json = serde_json::to_string_pretty(&payload)
-                    .context("failed to serialize ACT benchmark JSON")?;
-                write_json_file(output_path, &json, "act benchmark")?;
+                    act_meta.chunk_size,
+                    act_meta.action_dim,
+                )?;
                 eprintln!("ACT benchmark JSON saved to: {}", output_path.display());
             }
         } else {
-            let out = run_act_once(&mut act_engine, &act_meta, &act_inputs)?;
+            let tensors = prepare_act_input_tensors(&act_meta, &act_inputs)?;
+            let act_model_wrapper = registry
+                .get_mut("act")
+                .ok_or_else(|| anyhow::anyhow!("ACT model not found in registry"))?;
+            let out = match act_model_wrapper
+                .infer(InferenceInput::Act(&tensors), &InferenceContext::default())?
+            {
+                InferenceOutput::Act(out) => out,
+                _ => bail!("unexpected non-ACT output from ACT model"),
+            };
 
             println!(
                 "ACT output: chunk_size={}, action_dim={}",
@@ -795,19 +605,14 @@ fn main() -> Result<()> {
             }
 
             if let Some(ref output_path) = args.output_json {
-                let payload = ActJsonOutput {
-                    task: "act",
-                    model: args.model.display().to_string(),
-                    metadata: metadata_path.display().to_string(),
-                    episode_dir: episode_dir.display().to_string(),
-                    state_dim: act_meta.state_dim,
-                    chunk_size: out.chunk_size,
-                    action_dim: out.action_dim,
-                    actions: out.actions,
-                };
-                let json = serde_json::to_string_pretty(&payload)
-                    .context("failed to serialize ACT JSON")?;
-                write_json_file(output_path, &json, "act")?;
+                write_act_json(
+                    output_path,
+                    &args.model,
+                    &metadata_path,
+                    episode_dir,
+                    act_meta.state_dim,
+                    out,
+                )?;
                 eprintln!("ACT JSON saved to: {}", output_path.display());
             }
         }
@@ -842,10 +647,38 @@ fn main() -> Result<()> {
         args.device
     );
 
-    let mut engine = Engine::new(&args.model, &args.weights, &args.device, &tensor)?;
+    let mut registry = ModelRegistry::new();
+    let model_type = match args.task {
+        Task::Detect => ModelType::Detection,
+        _ => ModelType::Classification,
+    };
+    registry.load(
+        "vision",
+        ModelWrapper::Vision(VisionModel::new(
+            &args.model,
+            &args.weights,
+            &args.device,
+            &tensor,
+            model_type,
+        )?),
+    )?;
 
-    eprintln!("  input  : {}", engine.input_name());
-    eprintln!("  outputs: [{}]", engine.output_names().join(", "));
+    let vision_model_wrapper = registry
+        .get_mut("vision")
+        .ok_or_else(|| anyhow::anyhow!("vision model not found in registry"))?;
+    let (input_name, output_names_csv) = {
+        let vision_model = vision_model_wrapper
+            .as_vision_mut()
+            .ok_or_else(|| anyhow::anyhow!("registry model is not vision"))?;
+        let engine = vision_model.engine_mut();
+        (
+            engine.input_name().to_string(),
+            engine.output_names().join(", "),
+        )
+    };
+
+    eprintln!("  input  : {input_name}");
+    eprintln!("  outputs: [{output_names_csv}]");
 
     // Try to extract class label names from the model XML metadata.
     let labels = parse_labels_from_model_xml(&args.model).unwrap_or_default();
@@ -857,7 +690,15 @@ fn main() -> Result<()> {
 
     match args.task {
         Task::Classify => {
-            let output = engine.infer(&tensor)?;
+            let output = match vision_model_wrapper.infer(
+                InferenceInput::Image(&tensor),
+                &InferenceContext {
+                    labels: labels.clone(),
+                },
+            )? {
+                InferenceOutput::Tensor(v) => v,
+                _ => bail!("unexpected non-tensor output from vision model"),
+            };
             let results = top_k_classifications(&output, args.top_k);
             if labels.is_empty() {
                 println!("{:<10} {}", "CLASS ID", "PROBABILITY");
@@ -875,7 +716,7 @@ fn main() -> Result<()> {
             }
 
             if let Some(ref output_path) = args.output_json {
-                write_classification_json(
+                write_classification_json_file(
                     output_path,
                     &results,
                     &labels,
@@ -891,7 +732,15 @@ fn main() -> Result<()> {
         Task::Detect => {
             let detections = match args.detection_format {
                 DetectionFormat::Geti => {
-                    let outputs = engine.infer_multi(&tensor)?;
+                    let outputs = match vision_model_wrapper.infer(
+                        InferenceInput::Image(&tensor),
+                        &InferenceContext {
+                            labels: labels.clone(),
+                        },
+                    )? {
+                        InferenceOutput::MultiTensor(map) => map,
+                        _ => bail!("unexpected non-multi output for Geti detection"),
+                    };
 
                     // Geti models use "boxes" or "bboxes" for the box output.
                     let boxes_buf = outputs
@@ -900,7 +749,7 @@ fn main() -> Result<()> {
                         .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "model has no 'boxes' or 'bboxes' output (found: [{}])",
-                                engine.output_names().join(", ")
+                                output_names_csv
                             )
                         })?;
                     let labels_buf = outputs
@@ -910,11 +759,27 @@ fn main() -> Result<()> {
                     decode_geti_detections(boxes_buf.as_f32(), labels_buf.as_i64(), args.threshold)
                 }
                 DetectionFormat::Ssd => {
-                    let output = engine.infer(&tensor)?;
+                    let output = match vision_model_wrapper.infer(
+                        InferenceInput::Image(&tensor),
+                        &InferenceContext {
+                            labels: labels.clone(),
+                        },
+                    )? {
+                        InferenceOutput::Tensor(v) => v,
+                        _ => bail!("unexpected non-tensor output for SSD detection"),
+                    };
                     decode_ssd_detections(&output, args.threshold)
                 }
                 DetectionFormat::Yolo => {
-                    let output = engine.infer(&tensor)?;
+                    let output = match vision_model_wrapper.infer(
+                        InferenceInput::Image(&tensor),
+                        &InferenceContext {
+                            labels: labels.clone(),
+                        },
+                    )? {
+                        InferenceOutput::Tensor(v) => v,
+                        _ => bail!("unexpected non-tensor output for YOLO detection"),
+                    };
                     decode_yolo_detections(&output, args.num_classes, args.threshold)
                 }
             };
@@ -965,11 +830,11 @@ fn main() -> Result<()> {
             }
 
             if let Some(ref output_path) = args.output_json {
-                write_detection_json(
+                write_detection_json_file(
                     output_path,
                     &detections,
                     &labels,
-                    &args.detection_format,
+                    &format!("{:?}", args.detection_format).to_lowercase(),
                     args.threshold,
                     image_path,
                     &args.model,
@@ -996,8 +861,12 @@ fn main() -> Result<()> {
                 cfg.warmup_iters, cfg.duration_secs, cfg.max_iters, cfg.report_every_secs
             );
 
-            let report = run_benchmark(&mut engine, &tensor, &cfg)?;
-            let stage_timing = run_stage_timing(&args, image_path, &mut engine, &labels)?;
+            let vision_model = vision_model_wrapper
+                .as_vision_mut()
+                .ok_or_else(|| anyhow::anyhow!("registry model is not vision"))?;
+            let engine = vision_model.engine_mut();
+            let report = run_benchmark(engine, &tensor, &cfg)?;
+            let stage_timing = run_stage_timing(&args, image_path, engine, &labels)?;
 
             println!("Benchmark results");
             println!("-----------------");
@@ -1041,7 +910,7 @@ fn main() -> Result<()> {
             }
 
             if let Some(ref output_path) = args.output_json {
-                write_benchmark_json(
+                write_benchmark_json_file(
                     output_path,
                     &report,
                     stage_timing,
@@ -1049,7 +918,7 @@ fn main() -> Result<()> {
                     image_path,
                     &args.model,
                     &args.device,
-                    args.preprocess_backend,
+                    &format!("{:?}", args.preprocess_backend).to_lowercase(),
                     args.width,
                     args.height,
                 )?;

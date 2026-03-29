@@ -1,11 +1,14 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use image::RgbImage;
-use openvino::{CompiledModel, Core, DeviceType, ElementType, InferRequest, Shape, Tensor};
+use openvino::{CompiledModel, Core, ElementType, InferRequest, Shape, Tensor};
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+
+use crate::infra::device::parse_device;
+use crate::infra::tensor_utils::cast_bytes_mut_to_f32;
 
 pub struct ActEngine {
     compiled: CompiledModel,
@@ -40,14 +43,6 @@ impl ActEngine {
             .set_tensor("images.overview", &tensors.overview)
             .context("failed to set ACT input 'images.overview'")?;
         request.infer().context("ACT inference failed")
-    }
-}
-
-fn parse_device(device: &str) -> DeviceType<'static> {
-    match device.to_uppercase().as_str() {
-        "CPU" => DeviceType::CPU,
-        "GPU" => DeviceType::GPU,
-        _ => DeviceType::CPU,
     }
 }
 
@@ -204,7 +199,7 @@ fn state_to_tensor(state: &[f32], expected_dim: usize) -> Result<Tensor> {
     let buf = tensor
         .get_raw_data_mut()
         .context("failed to get mutable state tensor buffer")?;
-    let f32_buf = bytemuck_cast_mut(buf);
+    let f32_buf = cast_bytes_mut_to_f32(buf);
     f32_buf.copy_from_slice(state);
     Ok(tensor)
 }
@@ -223,7 +218,7 @@ fn image_to_nchw_tensor(img: &RgbImage, width: u32, height: u32) -> Result<Tenso
     let buf = tensor
         .get_raw_data_mut()
         .context("failed to get mutable image tensor buffer")?;
-    let f32_buf = bytemuck_cast_mut(buf);
+    let f32_buf = cast_bytes_mut_to_f32(buf);
 
     let hw = (width * height) as usize;
     for (idx, p) in resized.pixels().enumerate() {
@@ -364,21 +359,4 @@ pub fn load_sample_images_from_episode(
     map.insert("gripper".to_string(), gripper);
     map.insert("overview".to_string(), overview);
     Ok(map)
-}
-
-pub fn bytemuck_cast_mut(bytes: &mut [u8]) -> &mut [f32] {
-    assert!(
-        bytes.len() % std::mem::size_of::<f32>() == 0,
-        "buffer length is not a multiple of f32 size"
-    );
-    assert!(
-        bytes.as_ptr() as usize % std::mem::align_of::<f32>() == 0,
-        "buffer is not aligned for f32"
-    );
-    unsafe {
-        std::slice::from_raw_parts_mut(
-            bytes.as_mut_ptr() as *mut f32,
-            bytes.len() / std::mem::size_of::<f32>(),
-        )
-    }
 }

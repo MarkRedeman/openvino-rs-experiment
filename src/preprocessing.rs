@@ -3,6 +3,8 @@ use image::{GenericImageView, RgbImage};
 use openvino::{ElementType, Shape, Tensor};
 use std::path::Path;
 
+use crate::infra::tensor_utils::cast_bytes_mut_to_f32;
+
 /// Load an image from disk, resize it to the target dimensions, normalize pixel
 /// values to `[0.0, 1.0]`, and pack the result into an OpenVINO [`Tensor`] with
 /// shape `[1, height, width, 3]` (NHWC layout, `f32`).
@@ -44,7 +46,7 @@ pub fn rgb8_to_tensor(rgb: &RgbImage) -> Result<Tensor> {
         .get_raw_data_mut()
         .context("failed to get mutable tensor buffer")?;
 
-    let float_slice: &mut [f32] = bytemuck_cast_mut(buffer);
+    let float_slice: &mut [f32] = cast_bytes_mut_to_f32(buffer);
 
     for (i, pixel) in rgb.pixels().enumerate() {
         let base = i * 3;
@@ -54,31 +56,6 @@ pub fn rgb8_to_tensor(rgb: &RgbImage) -> Result<Tensor> {
     }
 
     Ok(tensor)
-}
-
-/// Reinterpret a `&mut [u8]` slice as `&mut [f32]`.
-///
-/// # Panics
-///
-/// Panics if the byte slice length is not a multiple of 4 or if the pointer is
-/// not aligned to `f32`.
-fn bytemuck_cast_mut(bytes: &mut [u8]) -> &mut [f32] {
-    assert!(
-        bytes.len() % std::mem::size_of::<f32>() == 0,
-        "buffer length is not a multiple of f32 size"
-    );
-    assert!(
-        bytes.as_ptr() as usize % std::mem::align_of::<f32>() == 0,
-        "buffer is not aligned for f32"
-    );
-    // SAFETY: We verified alignment and length. The OpenVINO tensor buffer for
-    // ElementType::F32 is guaranteed to be f32-aligned and sized.
-    unsafe {
-        std::slice::from_raw_parts_mut(
-            bytes.as_mut_ptr() as *mut f32,
-            bytes.len() / std::mem::size_of::<f32>(),
-        )
-    }
 }
 
 /// Return the (width, height) dimensions of an image on disk without fully
