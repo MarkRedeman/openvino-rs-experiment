@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use image::RgbImage;
-use openvino::{CompiledModel, Core, ElementType, InferRequest, Shape, Tensor};
-use regex::Regex;
+use openvino::{CompiledModel, Core, ElementType, InferRequest, Model, Shape, Tensor};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -12,6 +11,7 @@ use crate::infra::tensor_utils::cast_bytes_mut_to_f32;
 
 pub struct ActEngine {
     compiled: CompiledModel,
+    metadata: ActMetadata,
 }
 
 impl ActEngine {
@@ -20,10 +20,15 @@ impl ActEngine {
         let model = core
             .read_model_from_file(&model_xml.to_string_lossy(), &model_bin.to_string_lossy())
             .context("failed to read ACT model from file")?;
+        let metadata = discover_act_metadata(&model)?;
         let compiled = core
             .compile_model(&model, parse_device(device))
             .context("failed to compile ACT model")?;
-        Ok(Self { compiled })
+        Ok(Self { compiled, metadata })
+    }
+
+    pub fn metadata(&self) -> &ActMetadata {
+        &self.metadata
     }
 
     pub fn create_request(&mut self) -> Result<InferRequest> {
@@ -82,102 +87,124 @@ pub struct ActOutput {
     pub actions: Vec<Vec<f32>>,
 }
 
-pub fn load_metadata(metadata_path: &Path, model_xml_path: &Path) -> Result<ActMetadata> {
+pub fn load_metadata(metadata_path: &Path) -> Result<()> {
     let yaml = fs::read_to_string(metadata_path)
         .with_context(|| format!("failed to read metadata YAML: {}", metadata_path.display()))?;
 
     let _parsed: RawActMetadata =
         serde_yaml::from_str(&yaml).context("failed to parse metadata YAML")?;
 
-    let xml = fs::read_to_string(model_xml_path)
-        .with_context(|| format!("failed to read model XML: {}", model_xml_path.display()))?;
+    Ok(())
+}
 
-    let state_re =
-        Regex::new(r#"<layer[^>]*name=\"state\"[^>]*>[\s\S]*?<data[^>]*shape=\"1,([0-9]+)\""#)
-            .context("failed to compile state regex")?;
-    let gripper_re = Regex::new(
-        r#"<layer[^>]*name=\"images\.gripper\"[^>]*>[\s\S]*?<data[^>]*shape=\"1,3,([0-9]+),([0-9]+)\""#,
-    )
-    .context("failed to compile gripper regex")?;
-    let overview_re = Regex::new(
-        r#"<layer[^>]*name=\"images\.overview\"[^>]*>[\s\S]*?<data[^>]*shape=\"1,3,([0-9]+),([0-9]+)\""#,
-    )
-    .context("failed to compile overview regex")?;
-    let action_re = Regex::new(
-        r#"<port[^>]*precision=\"FP32\"[^>]*names=\"action\"[^>]*>[\s\S]*?<dim>1</dim>[\s\S]*?<dim>([0-9]+)</dim>[\s\S]*?<dim>([0-9]+)</dim>"#,
-    )
-    .context("failed to compile action regex")?;
+fn shape_dims(shape: &Shape) -> &[i64] {
+    shape.get_dimensions()
+}
 
-    let state_dim = state_re
-        .captures(&xml)
-        .and_then(|c| c.get(1))
-        .ok_or_else(|| anyhow::anyhow!("failed to discover state shape from model XML"))?
-        .as_str()
-        .parse::<usize>()
-        .context("failed to parse state dim")?;
+fn discover_act_metadata(model: &Model) -> Result<ActMetadata> {
+    let mut state_dim: Option<usize> = None;
+    let mut gripper_hw: Option<(u32, u32)> = None;
+    let mut overview_hw: Option<(u32, u32)> = None;
+    let mut action_shape: Option<(usize, usize)> = None;
 
-    let gripper_caps = gripper_re
-        .captures(&xml)
-        .ok_or_else(|| anyhow::anyhow!("failed to discover images.gripper shape from model XML"))?;
-    let gripper_h = gripper_caps
-        .get(1)
-        .ok_or_else(|| anyhow::anyhow!("missing gripper height"))?
-        .as_str()
-        .parse::<u32>()
-        .context("failed to parse gripper height")?;
-    let gripper_w = gripper_caps
-        .get(2)
-        .ok_or_else(|| anyhow::anyhow!("missing gripper width"))?
-        .as_str()
-        .parse::<u32>()
-        .context("failed to parse gripper width")?;
+    let input_count = model
+        .get_inputs_len()
+        .context("failed to read ACT model input count")?;
+    for i in 0..input_count {
+        let node = model
+            .get_input_by_index(i)
+            .with_context(|| format!("failed to read ACT input at index {i}"))?;
+        let name = node
+            .get_name()
+            .with_context(|| format!("failed to read ACT input name at index {i}"))?;
+        let shape = node
+            .get_shape()
+            .with_context(|| format!("failed to read ACT input shape for '{name}'"))?;
+        let dims = shape_dims(&shape);
 
-    let overview_caps = overview_re.captures(&xml).ok_or_else(|| {
-        anyhow::anyhow!("failed to discover images.overview shape from model XML")
-    })?;
-    let overview_h = overview_caps
-        .get(1)
-        .ok_or_else(|| anyhow::anyhow!("missing overview height"))?
-        .as_str()
-        .parse::<u32>()
-        .context("failed to parse overview height")?;
-    let overview_w = overview_caps
-        .get(2)
-        .ok_or_else(|| anyhow::anyhow!("missing overview width"))?
-        .as_str()
-        .parse::<u32>()
-        .context("failed to parse overview width")?;
+        match name.as_str() {
+            "state" => {
+                if dims.len() != 2 || dims[0] != 1 || dims[1] <= 0 {
+                    bail!(
+                        "unexpected ACT input shape for 'state': {:?} (expected [1, state_dim])",
+                        dims
+                    );
+                }
+                state_dim = Some(dims[1] as usize);
+            }
+            "images.gripper" => {
+                if dims.len() != 4 || dims[0] != 1 || dims[1] != 3 || dims[2] <= 0 || dims[3] <= 0 {
+                    bail!(
+                        "unexpected ACT input shape for 'images.gripper': {:?} (expected [1, 3, H, W])",
+                        dims
+                    );
+                }
+                gripper_hw = Some((dims[2] as u32, dims[3] as u32));
+            }
+            "images.overview" => {
+                if dims.len() != 4 || dims[0] != 1 || dims[1] != 3 || dims[2] <= 0 || dims[3] <= 0 {
+                    bail!(
+                        "unexpected ACT input shape for 'images.overview': {:?} (expected [1, 3, H, W])",
+                        dims
+                    );
+                }
+                overview_hw = Some((dims[2] as u32, dims[3] as u32));
+            }
+            _ => {}
+        }
+    }
 
-    if gripper_h != overview_h || gripper_w != overview_w {
+    let output_count = model
+        .get_outputs_len()
+        .context("failed to read ACT model output count")?;
+    for i in 0..output_count {
+        let node = model
+            .get_output_by_index(i)
+            .with_context(|| format!("failed to read ACT output at index {i}"))?;
+        let name = node
+            .get_name()
+            .with_context(|| format!("failed to read ACT output name at index {i}"))?;
+        if name != "action" {
+            continue;
+        }
+
+        let shape = node
+            .get_shape()
+            .context("failed to read ACT output shape for 'action'")?;
+        let dims = shape_dims(&shape);
+        if dims.len() != 3 || dims[0] != 1 || dims[1] <= 0 || dims[2] <= 0 {
+            bail!(
+                "unexpected ACT output shape for 'action': {:?} (expected [1, chunk_size, action_dim])",
+                dims
+            );
+        }
+        action_shape = Some((dims[1] as usize, dims[2] as usize));
+    }
+
+    let state_dim =
+        state_dim.ok_or_else(|| anyhow::anyhow!("ACT model is missing input 'state'"))?;
+    let gripper_hw =
+        gripper_hw.ok_or_else(|| anyhow::anyhow!("ACT model is missing input 'images.gripper'"))?;
+    let overview_hw = overview_hw
+        .ok_or_else(|| anyhow::anyhow!("ACT model is missing input 'images.overview'"))?;
+
+    if gripper_hw != overview_hw {
         bail!(
             "camera shapes differ (gripper={}x{}, overview={}x{}), unsupported",
-            gripper_w,
-            gripper_h,
-            overview_w,
-            overview_h
+            gripper_hw.1,
+            gripper_hw.0,
+            overview_hw.1,
+            overview_hw.0
         );
     }
 
-    let action_caps = action_re
-        .captures(&xml)
-        .ok_or_else(|| anyhow::anyhow!("failed to discover action output shape from model XML"))?;
-    let chunk_size = action_caps
-        .get(1)
-        .ok_or_else(|| anyhow::anyhow!("missing action chunk size"))?
-        .as_str()
-        .parse::<usize>()
-        .context("failed to parse action chunk size")?;
-    let action_dim = action_caps
-        .get(2)
-        .ok_or_else(|| anyhow::anyhow!("missing action dim"))?
-        .as_str()
-        .parse::<usize>()
-        .context("failed to parse action dim")?;
+    let (chunk_size, action_dim) =
+        action_shape.ok_or_else(|| anyhow::anyhow!("ACT model is missing output 'action'"))?;
 
     Ok(ActMetadata {
         state_dim,
-        image_height: gripper_h,
-        image_width: gripper_w,
+        image_height: gripper_hw.0,
+        image_width: gripper_hw.1,
         camera_names: vec!["gripper".to_string(), "overview".to_string()],
         action_dim,
         chunk_size,

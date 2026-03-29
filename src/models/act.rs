@@ -15,13 +15,9 @@ pub struct ActModel {
 }
 
 impl ActModel {
-    pub fn new(
-        model_xml: &Path,
-        model_bin: &Path,
-        device: &str,
-        metadata: ActMetadata,
-    ) -> Result<Self> {
+    pub fn new(model_xml: &Path, model_bin: &Path, device: &str) -> Result<Self> {
         let engine = ActEngine::new(model_xml, model_bin, device)?;
+        let metadata = engine.metadata().clone();
         let info = ModelInfo {
             model_type: ModelType::Act,
             input_names: vec![

@@ -453,24 +453,29 @@ fn main() -> Result<()> {
             bail!("ACT metadata file not found: {}", metadata_path.display());
         }
 
-        let act_meta = load_metadata(&metadata_path, &args.model)?;
-
         eprintln!(
             "Loading ACT model: {} (device: {})",
             args.model.display(),
             args.device
         );
 
+        load_metadata(&metadata_path)?;
+
         let mut registry = ModelRegistry::new();
         registry.load(
             "act",
-            ModelWrapper::Act(ActModel::new(
-                &args.model,
-                &args.weights,
-                &args.device,
-                act_meta.clone(),
-            )?),
+            ModelWrapper::Act(ActModel::new(&args.model, &args.weights, &args.device)?),
         )?;
+
+        let act_meta = {
+            let act_model_wrapper = registry
+                .get_mut("act")
+                .ok_or_else(|| anyhow::anyhow!("ACT model not found in registry"))?;
+            let act_model = act_model_wrapper
+                .as_act_mut()
+                .ok_or_else(|| anyhow::anyhow!("registry model is not ACT"))?;
+            act_model.metadata().clone()
+        };
 
         let state = parse_state_from_episode(&episode_dir.join("data.jsonl"))?;
         let images = load_sample_images_from_episode(
