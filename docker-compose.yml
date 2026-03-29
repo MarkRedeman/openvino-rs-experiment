@@ -4,9 +4,11 @@ services:
     volumes:
       - ./models:/models:ro
       - ./images:/images:ro
+      - ./episodes:/episodes:ro
     # Example: classify a card image.
     # Adjust paths and arguments to match your model.
     command: >
+      infer
       --model /models/card-classification/model.xml
       --weights /models/card-classification/model.bin
       --image /images/diamond-card.jpg
@@ -23,7 +25,9 @@ services:
     volumes:
       - ./models:/models:ro
       - ./images:/images:ro
+      - ./episodes:/episodes:ro
     command: >
+      infer
       --model /models/card-classification/model.xml
       --weights /models/card-classification/model.bin
       --image /images/diamond-card.jpg
@@ -40,7 +44,9 @@ services:
     volumes:
       - ./models:/models:ro
       - ./images:/images:ro
+      - ./episodes:/episodes:ro
     command: >
+      infer
       --model /models/card-classification/model.xml
       --weights /models/card-classification/model.bin
       --image /images/diamond-card.jpg

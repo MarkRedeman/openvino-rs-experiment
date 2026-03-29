@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use openvino::{
-    CompiledModel, Core, ElementType, InferRequest, Layout, Model, ResizeAlgorithm, Tensor,
-    prepostprocess,
+    prepostprocess, CompiledModel, Core, ElementType, InferRequest, Layout, Model, ResizeAlgorithm,
+    Tensor,
 };
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::infra::device::parse_device;
+use crate::infra::device_compat::diagnose_compile_error;
+use crate::infra::diagnostics::get_last_openvino_error;
+use crate::infra::model_info::parse_model_xml;
 
 /// Raw bytes read from an output tensor, together with its element type.
 #[derive(Debug, Clone)]
@@ -108,9 +111,15 @@ impl Engine {
         )?;
 
         let device_type = parse_device(device);
-        let compiled = core
-            .compile_model(&new_model, device_type)
-            .context("failed to compile model")?;
+        let compiled = core.compile_model(&new_model, device_type).map_err(|e| {
+            let detail = get_last_openvino_error();
+            let model_info = parse_model_xml(model_xml).ok();
+            let diagnosis =
+                diagnose_compile_error(device, &detail, model_info.as_ref());
+            anyhow::anyhow!(
+                "failed to compile model for device '{device}': {e}\n  detail: {detail}\n\n{diagnosis}"
+            )
+        })?;
 
         Ok(Self {
             compiled,

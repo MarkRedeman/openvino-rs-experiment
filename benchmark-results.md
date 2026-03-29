@@ -73,10 +73,10 @@ Use these to reduce run-to-run noise:
 ```bash
 # Detection, 3 repeats each backend (collect medians)
 for i in 1 2 3; do
-  ./standalone/run-inference.sh --model models/fish-detection/model.xml --weights models/fish-detection/model.bin --image images/fish.png --task benchmark --detection-format geti --threshold 0.3 --width 992 --height 800 --benchmark-warmup 20 --benchmark-duration 15 --benchmark-report-every 0 --preprocess-backend rust
+  ./standalone/run-inference.sh infer --model models/fish-detection/model.xml --weights models/fish-detection/model.bin --image images/fish.png --task benchmark --detection-format geti --threshold 0.3 --width 992 --height 800 --benchmark-warmup 20 --benchmark-duration 15 --benchmark-report-every 0 --preprocess-backend rust
 done
 
 for i in 1 2 3; do
-  ./standalone/run-inference.sh --model models/fish-detection/model.xml --weights models/fish-detection/model.bin --image images/fish.png --task benchmark --detection-format geti --threshold 0.3 --width 992 --height 800 --benchmark-warmup 20 --benchmark-duration 15 --benchmark-report-every 0 --preprocess-backend openvino
+  ./standalone/run-inference.sh infer --model models/fish-detection/model.xml --weights models/fish-detection/model.bin --image images/fish.png --task benchmark --detection-format geti --threshold 0.3 --width 992 --height 800 --benchmark-warmup 20 --benchmark-duration 15 --benchmark-report-every 0 --preprocess-backend openvino
 done
 ```

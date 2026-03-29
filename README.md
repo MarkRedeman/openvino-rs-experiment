@@ -2,7 +2,8 @@
 
 Vision model inference in Rust using [OpenVINO](https://docs.openvino.ai/).
 Supports image classification, object detection (Geti/OTX, SSD, YOLO output formats), benchmark mode,
-and ACT policy inference for Physical AI Studio OpenVINO exports.
+ACT policy inference for Physical AI Studio OpenVINO exports, and device compatibility checking with
+structured diagnostics.
 
 The entire build and runtime environment is Dockerized — **only Docker is required** on the host machine.
 
@@ -18,9 +19,9 @@ The codebase follows a lightweight hexagonal split:
 
 - `src/domain/` — core model abstraction (`InferenceModel`), shared input/output types, domain errors
 - `src/models/` — adapters for concrete runtimes (`VisionModel`, `ActModel`) + enum-dispatched `ModelWrapper` + `ModelRegistry` (`load/get/unload`)
-- `src/infra/` — shared infra utilities (device parsing, tensor buffer casting)
+- `src/infra/` — shared infra utilities (device parsing, tensor buffer cast, model XML parsing, device compatibility diagnostics)
 - `src/output.rs` — JSON output payloads/writers for CLI tasks
-- `src/main.rs` — CLI/bootstrap orchestration
+- `src/main.rs` — CLI/bootstrap orchestration (subcommands: `infer`, `check`, `devices`)
 
 ## Project structure
 
@@ -35,11 +36,11 @@ inference-rs/
 ├── fonts/
 │   └── DejaVuSans.ttf         # Embedded font for detection label rendering
 ├── src/
-│   ├── main.rs                # CLI entry point and app bootstrap
+│   ├── main.rs                # CLI entry point (subcommands: infer, check, devices)
 │   ├── lib.rs                 # Module exports
 │   ├── domain/                # Inference domain API (trait/types/errors)
 │   ├── models/                # Vision/ACT model adapters + registry
-│   ├── infra/                 # Shared infra helpers
+│   ├── infra/                 # Shared infra helpers (device, diagnostics, model_info, device_compat)
 │   ├── output.rs              # JSON output serialization/writing
 │   ├── engine.rs              # OpenVINO vision engine internals
 │   ├── act.rs                 # OpenVINO ACT engine internals
@@ -73,6 +74,7 @@ docker run --rm \
   -v ./models:/models:ro \
   -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -87,6 +89,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -v ./images:/images:ro \
   -v ./output:/output \
   inference-rs-inference \
+  infer \
   --model /models/fish-detection/model.xml \
   --weights /models/fish-detection/model.bin \
   --image /images/fish.png \
@@ -103,6 +106,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -v ./episodes:/episodes:ro \
   -v ./output:/output \
   inference-rs-inference \
+  infer \
   --task act \
   --model /models/act-openvino/act.xml \
   --weights /models/act-openvino/act.bin \
@@ -114,6 +118,7 @@ docker run --rm \
   -v ./models:/models:ro \
   -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -122,6 +127,19 @@ docker run --rm \
   --height 224 \
   --benchmark-warmup 20 \
   --benchmark-duration 10
+
+# 6) List available devices
+docker run --rm inference-rs-inference devices
+
+# 7) Check model compatibility across all devices
+docker run --rm \
+  --device /dev/dri:/dev/dri \
+  --device /dev/accel/accel0:/dev/accel/accel0 \
+  -v ./models:/models:ro \
+  inference-rs-inference \
+  check \
+  --model /models/fish-detection/model.xml \
+  --weights /models/fish-detection/model.bin
 ```
 
 
@@ -148,6 +166,7 @@ docker run --rm \
   -v ./models:/models:ro \
   -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -162,6 +181,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -v ./images:/images:ro \
   -v ./output:/output \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -176,6 +196,7 @@ docker run --rm \
   -v ./models:/models:ro \
   -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/fish-detection/model.xml \
   --weights /models/fish-detection/model.bin \
   --image /images/fish.png \
@@ -191,6 +212,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -v ./images:/images:ro \
   -v ./output:/output \
   inference-rs-inference \
+  infer \
   --model /models/fish-detection/model.xml \
   --weights /models/fish-detection/model.bin \
   --image /images/fish.png \
@@ -207,6 +229,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -v ./images:/images:ro \
   -v ./output:/output \
   inference-rs-inference \
+  infer \
   --model /models/fish-detection/model.xml \
   --weights /models/fish-detection/model.bin \
   --image /images/fish.png \
@@ -222,6 +245,7 @@ docker run --rm \
   -v ./models:/models:ro \
   -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -238,6 +262,7 @@ docker run --rm \
   -v ./models:/models:ro \
   -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/fish-detection/model.xml \
   --weights /models/fish-detection/model.bin \
   --image /images/fish.png \
@@ -256,7 +281,7 @@ docker run --rm \
 
 ### Device selection (CPU, GPU/XPU, NPU, AUTO)
 
-OpenVINO device selection is controlled with `--device`.
+OpenVINO device selection is controlled with `--device` on the `infer` subcommand.
 
 - `CPU` — CPU plugin
 - `GPU` — Intel GPU plugin (covers iGPU and Arc/dGPU; OpenVINO does not use `XPU` as a device string)
@@ -267,7 +292,20 @@ OpenVINO device selection is controlled with `--device`.
 List available devices at runtime:
 
 ```bash
-docker run --rm inference-rs-inference --list-devices
+docker run --rm inference-rs-inference devices
+```
+
+Check model compatibility across all available devices:
+
+```bash
+docker run --rm \
+  --device /dev/dri:/dev/dri \
+  --device /dev/accel/accel0:/dev/accel/accel0 \
+  -v ./models:/models:ro \
+  inference-rs-inference \
+  check \
+  --model /models/fish-detection/model.xml \
+  --weights /models/fish-detection/model.bin
 ```
 
 GPU example (`docker run`):
@@ -278,6 +316,7 @@ docker run --rm \
   -v ./models:/models:ro \
   -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -294,6 +333,7 @@ docker run --rm \
   -v ./models:/models:ro \
   -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -344,6 +384,7 @@ Run inference directly:
 
 ```bash
 ./standalone/run-inference.sh \
+  infer \
   --model models/card-classification/model.xml \
   --weights models/card-classification/model.bin \
   --image images/diamond-card.jpg \
@@ -351,6 +392,7 @@ Run inference directly:
   --top-k 4
 
 ./standalone/run-inference.sh \
+  infer \
   --model models/fish-detection/model.xml \
   --weights models/fish-detection/model.bin \
   --image images/fish.png \
@@ -362,6 +404,7 @@ Run inference directly:
 
 # ACT policy inference (OpenVINO export package)
 ./standalone/run-inference.sh \
+  infer \
   --task act \
   --model models/act-openvino/act.xml \
   --weights models/act-openvino/act.bin \
@@ -370,6 +413,7 @@ Run inference directly:
 
 # ACT benchmark mode (reuses one loaded model/request)
 ./standalone/run-inference.sh \
+  infer \
   --task act-benchmark \
   --model models/act-openvino/act.xml \
   --weights models/act-openvino/act.bin \
@@ -378,6 +422,15 @@ Run inference directly:
   --benchmark-duration 10 \
   --benchmark-report-every 1 \
   --output-json output/act-benchmark.json
+
+# List available devices
+./standalone/run-inference.sh devices
+
+# Check model compatibility
+./standalone/run-inference.sh \
+  check \
+  --model models/fish-detection/model.xml \
+  --weights models/fish-detection/model.bin
 ```
 
 The `standalone/` directory is portable — you can tar it up and copy it to
@@ -398,6 +451,7 @@ Example:
 
 ```bash
 ./standalone/run-inference.sh \
+  infer \
   --task act-benchmark \
   --model ./models/act-openvino/act.xml \
   --weights ./models/act-openvino/act.bin \
@@ -428,11 +482,28 @@ For accelerator troubleshooting (NPU setup, iGPU vs discrete Arc selection, Dock
 
 ### CLI reference
 
+The CLI uses subcommands. Run `inference-rs --help` for the top-level overview,
+or `inference-rs <command> --help` for command-specific options.
+
 ```
-inference-rs — Run vision-model inference with OpenVINO
+inference-rs — OpenVINO inference toolkit for vision and ACT models
+
+USAGE:
+    inference-rs <COMMAND>
+
+COMMANDS:
+    infer    Run inference (classify, detect, benchmark, act, act-benchmark)
+    check    Check model compatibility against available devices
+    devices  List available OpenVINO devices and their capabilities
+    help     Print this message or the help of the given subcommand(s)
+```
+
+#### `infer` — Run inference
+
+```
+inference-rs infer [OPTIONS] --model <PATH> --weights <PATH>
 
 Options:
-  --list-devices              List available OpenVINO devices and exit
   --model <PATH>               Path to the OpenVINO IR model (.xml)
   --weights <PATH>             Path to the OpenVINO IR weights (.bin)
   --image <PATH>               Path to the input image (required for classify/detect/benchmark)
@@ -456,9 +527,31 @@ Options:
   --benchmark-stage-iters <N>  Rough stage timing iterations [default: 30, 0 disables]
   --benchmark-stage-read-each-iter
                                In stage timing, include read+decode every iteration
-  -h, --help                   Print help
-  -V, --version                Print version
 ```
+
+#### `check` — Check model compatibility
+
+Parses the model XML to show a summary (inputs, outputs, op types, element types),
+then tries `compile_model` on each available device. On failure, shows structured
+diagnostics with likely causes and actionable suggestions.
+
+```
+inference-rs check [OPTIONS] --model <PATH> --weights <PATH>
+
+Options:
+  --model <PATH>      Path to the OpenVINO IR model (.xml)
+  --weights <PATH>    Path to the OpenVINO IR weights (.bin)
+  --device <DEVICE>   Only check specific device(s) (default: all available)
+```
+
+#### `devices` — List available devices
+
+```
+inference-rs devices
+```
+
+Lists all OpenVINO devices visible to the runtime, with device name, version,
+and supported capabilities.
 
 ## Detection formats
 

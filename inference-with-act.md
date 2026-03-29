@@ -1,5 +1,9 @@
 # ACT (Action Chunking with Transformers) Inference Implementation Plan
 
+> **Note**: This is a historical design document written before implementation.
+> The actual CLI now uses subcommands — see `inference-rs infer --task act --help`
+> for current usage, and `README.md` for up-to-date examples.
+
 ## Goal
 
 Extend `inference-rs` to support **ACT (Action Chunking with Transformers)** policy inference for

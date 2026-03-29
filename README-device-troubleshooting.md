@@ -12,7 +12,7 @@ From the project root:
 
 ```bash
 docker compose build
-docker run --rm inference-rs-inference --list-devices
+docker run --rm inference-rs-inference devices
 ```
 
 Expected output is a list such as:
@@ -44,7 +44,7 @@ Run with:
 ```bash
 docker run --rm \
   --device /dev/dri:/dev/dri \
-  inference-rs-inference --list-devices
+  inference-rs-inference devices
 ```
 
 Host checks:
@@ -64,7 +64,7 @@ Run with:
 ```bash
 docker run --rm \
   --device /dev/accel/accel0:/dev/accel/accel0 \
-  inference-rs-inference --list-devices
+  inference-rs-inference devices
 ```
 
 Host checks:
@@ -79,7 +79,7 @@ groups
 
 ## NPU troubleshooting
 
-If `NPU` is missing from `--list-devices`:
+If `NPU` is missing from `devices` output:
 
 1. Verify NPU driver packages are installed on host (Linux):
    - `intel-level-zero-npu`
@@ -88,14 +88,16 @@ If `NPU` is missing from `--list-devices`:
 3. Verify device node exists: `ls /dev/accel/accel0`.
 4. Re-run container with explicit accel passthrough:
    - `--device /dev/accel/accel0:/dev/accel/accel0`
-5. Re-run `--list-devices` inside container.
+5. Re-run `devices` command inside container.
 
 If `NPU` appears but inference fails:
 
-1. Start with a small known-good model and `--task classify`.
-2. Try fallback ordering to confirm pipeline health:
-   - `--device AUTO:NPU,CPU`
-3. Compare with CPU run using the exact same model and inputs.
+1. Start with a small known-good model and `infer --task classify`.
+2. Try `check` to see which devices support your model:
+   - `check --model <model.xml> --weights <model.bin>`
+3. Try fallback ordering to confirm pipeline health:
+   - `infer --device AUTO:NPU,CPU`
+4. Compare with CPU run using the exact same model and inputs.
 
 ## Choosing iGPU vs discrete Arc GPU
 
@@ -105,7 +107,7 @@ OpenVINO typically exposes indexed GPU devices like `GPU.0` and `GPU.1`.
 ### Step 1: enumerate
 
 ```bash
-docker run --rm --device /dev/dri:/dev/dri inference-rs-inference --list-devices
+docker run --rm --device /dev/dri:/dev/dri inference-rs-inference devices
 ```
 
 ### Step 2: test explicit indices
@@ -115,6 +117,7 @@ docker run --rm --device /dev/dri:/dev/dri inference-rs-inference --list-devices
 docker run --rm --device /dev/dri:/dev/dri \
   -v ./models:/models:ro -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -126,6 +129,7 @@ docker run --rm --device /dev/dri:/dev/dri \
 docker run --rm --device /dev/dri:/dev/dri \
   -v ./models:/models:ro -v ./images:/images:ro \
   inference-rs-inference \
+  infer \
   --model /models/card-classification/model.xml \
   --weights /models/card-classification/model.bin \
   --image /images/diamond-card.jpg \
@@ -144,7 +148,7 @@ Instead of mounting all of `/dev/dri`, mount a specific render node so the conta
 # Example: expose only renderD128
 docker run --rm \
   --device /dev/dri/renderD128:/dev/dri/renderD128 \
-  inference-rs-inference --list-devices
+  inference-rs-inference devices
 ```
 
 Repeat with another render node (`renderD129`, etc.) to map each node to iGPU/dGPU.
@@ -152,18 +156,19 @@ Repeat with another render node (`renderD129`, etc.) to map each node to iGPU/dG
 ## Common failure patterns
 
 - `--device NPU` silently behaves like CPU
-  - Old binary or old `parse_device` logic; rebuild and verify with `--list-devices`.
+  - Old binary or old `parse_device` logic; rebuild and verify with `devices` command.
 - `GPU` or `NPU` missing in container, but present on host
   - Missing `--device` passthrough (`/dev/dri` or `/dev/accel/accel0`).
 - Permission denied on device nodes
   - User not in `render` group, or restrictive node permissions.
 - `AUTO` picks CPU unexpectedly
-  - GPU/NPU not visible or plugin unavailable; verify with `--list-devices` then try explicit `GPU` or `NPU`.
+  - GPU/NPU not visible or plugin unavailable; verify with `devices` then try explicit `GPU` or `NPU`.
 
 ## Recommended debug sequence
 
-1. `--list-devices` without passthrough (baseline)
-2. `--list-devices` with GPU passthrough
-3. `--list-devices` with NPU passthrough
-4. run one small inference on explicit `GPU.0`/`GPU.1`/`NPU`
-5. use benchmark mode to confirm you are on intended hardware
+1. `devices` without passthrough (baseline)
+2. `devices` with GPU passthrough
+3. `devices` with NPU passthrough
+4. `check --model ... --weights ...` to test compatibility across devices
+5. run one small inference on explicit `GPU.0`/`GPU.1`/`NPU`
+6. use benchmark mode to confirm you are on intended hardware

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use image::RgbImage;
 use openvino::{CompiledModel, Core, ElementType, InferRequest, Model, Shape, Tensor};
 use serde::Deserialize;
@@ -7,6 +7,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::infra::device::parse_device;
+use crate::infra::device_compat::diagnose_compile_error;
+use crate::infra::diagnostics::get_last_openvino_error;
+use crate::infra::model_info::parse_model_xml;
 use crate::infra::tensor_utils::cast_bytes_mut_to_f32;
 
 pub struct ActEngine {
@@ -23,7 +26,15 @@ impl ActEngine {
         let metadata = discover_act_metadata(&model)?;
         let compiled = core
             .compile_model(&model, parse_device(device))
-            .context("failed to compile ACT model")?;
+            .map_err(|e| {
+                let detail = get_last_openvino_error();
+                let model_info = parse_model_xml(model_xml).ok();
+                let diagnosis =
+                    diagnose_compile_error(device, &detail, model_info.as_ref());
+                anyhow::anyhow!(
+                    "failed to compile ACT model for device '{device}': {e}\n  detail: {detail}\n\n{diagnosis}"
+                )
+            })?;
         Ok(Self { compiled, metadata })
     }
 
