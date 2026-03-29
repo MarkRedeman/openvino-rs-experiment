@@ -353,6 +353,10 @@ Output files:
 
 - `output/act-benchmark.json` (if `--output-json` is set)
 
+### ACT code walkthrough
+
+For a detailed ACT code walkthrough (model load, episode load, camera mapping, inference, and output shape), see `README-act-inference.md`.
+
 ### CLI reference
 
 ```
