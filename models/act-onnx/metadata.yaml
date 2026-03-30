@@ -1,0 +1,4 @@
+backend: onnx
+physicalai_train_version: 0.1.0
+policy_class: physicalai.policies.act.policy.ACT
+preprocessing_type: image_resize

@@ -1,0 +1,133 @@
+backend: torch
+config:
+  class_path: physicalai.policies.act.config.ACTConfig
+  init_args:
+    chunk_size: 100
+    dim_feedforward: 3200
+    dim_model: 512
+    dropout: 0.1
+    feedforward_activation: relu
+    input_features:
+      action:
+        ftype: ACTION
+        name: action
+        normalization_data:
+          max: null
+          mean:
+          - -1.4367769450282073
+          - -23.7271870080052
+          - 36.34086282321112
+          - 64.9755992176171
+          - 52.477925753423605
+          - 17.080943619644277
+          min: null
+          std:
+          - 27.83709219208556
+          - 49.37945318890616
+          - 43.28602697075154
+          - 15.081402102411177
+          - 10.481037507455671
+          - 15.523399285061965
+        shape:
+        - 6
+      gripper:
+        ftype: VISUAL
+        name: gripper
+        normalization_data:
+          max: null
+          mean:
+          - - - 0.32115125183100757
+          - - - 0.3161520503359343
+          - - - 0.3332929840106277
+          min: null
+          std:
+          - - - 0.04507047850756487
+          - - - 0.04631357520582189
+          - - - 0.04642852530481386
+        shape:
+        - 3
+        - 480
+        - 640
+      overview:
+        ftype: VISUAL
+        name: overview
+        normalization_data:
+          max: null
+          mean:
+          - - - 0.3383159094040266
+          - - - 0.3340298930734372
+          - - - 0.3458888094916865
+          min: null
+          std:
+          - - - 0.06047637342246429
+          - - - 0.0589902330494436
+          - - - 0.05842663873778338
+        shape:
+        - 3
+        - 480
+        - 640
+      state:
+        ftype: STATE
+        name: state
+        normalization_data:
+          max: null
+          mean:
+          - -1.6439045750391237
+          - -22.70051009898315
+          - 37.72067720205385
+          - 65.16947292723387
+          - 52.455292361160545
+          - 17.256859108093593
+          min: null
+          std:
+          - 27.788021499968107
+          - 49.792701250146926
+          - 42.623040778638554
+          - 14.89175417574456
+          - 10.481361486535123
+          - 15.126274320240432
+        shape:
+        - 6
+    kl_weight: 10.0
+    latent_dim: 32
+    max_image_size: 768
+    n_action_steps: 100
+    n_decoder_layers: 1
+    n_encoder_layers: 4
+    n_heads: 8
+    n_obs_steps: 1
+    n_vae_encoder_layers: 4
+    optimizer_grad_clip_norm: 10
+    optimizer_lr: 1.0e-05
+    optimizer_weight_decay: 0.0001
+    output_features:
+      action:
+        ftype: ACTION
+        name: action
+        normalization_data:
+          max: null
+          mean:
+          - -1.4367769450282073
+          - -23.7271870080052
+          - 36.34086282321112
+          - 64.9755992176171
+          - 52.477925753423605
+          - 17.080943619644277
+          min: null
+          std:
+          - 27.83709219208556
+          - 49.37945318890616
+          - 43.28602697075154
+          - 15.081402102411177
+          - 10.481037507455671
+          - 15.523399285061965
+        shape:
+        - 6
+    pre_norm: false
+    pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1
+    replace_final_stride_with_dilation: false
+    temporal_ensemble_coeff: null
+    use_vae: true
+    vision_backbone: resnet18
+physicalai_train_version: 0.1.0
+policy_class: physicalai.policies.act.policy.ACT

@@ -1,0 +1,14 @@
+{
+  "policy": {
+    "name": "act",
+    "class_path": "physicalai.policies.act.policy.ACT"
+  },
+  "artifacts": {
+    "onnx": "act.onnx"
+  },
+  "runner": {
+    "class_path": "physicalai.inference.runners.single_pass.SinglePass"
+  },
+  "format": "policy_package",
+  "version": "1.0"
+}
