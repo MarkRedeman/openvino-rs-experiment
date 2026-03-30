@@ -1,0 +1,66 @@
+# Python reference implementation — Docker Compose services
+# Mirrors the Rust docker-compose.yml for fair benchmarking comparison.
+services:
+  inference-py:
+    privileged: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ../models:/models:ro
+      - ../images:/images:ro
+      - ../episodes:/episodes:ro
+    command: >
+      infer
+      --model /models/card-classification/model.xml
+      --weights /models/card-classification/model.bin
+      --image /images/diamond-card.jpg
+      --task classify
+      --top-k 4
+      --width 224
+      --height 224
+      --device CPU
+
+  inference-gpu-py:
+    privileged: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ../models:/models:ro
+      - ../images:/images:ro
+      - ../episodes:/episodes:ro
+    command: >
+      infer
+      --model /models/card-classification/model.xml
+      --weights /models/card-classification/model.bin
+      --image /images/diamond-card.jpg
+      --task classify
+      --top-k 4
+      --width 224
+      --height 224
+      --device GPU
+
+  inference-npu-py:
+    privileged: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+    devices:
+      - /dev/accel/accel0:/dev/accel/accel0
+    volumes:
+      - ../models:/models:ro
+      - ../images:/images:ro
+      - ../episodes:/episodes:ro
+    command: >
+      infer
+      --model /models/card-classification/model.xml
+      --weights /models/card-classification/model.bin
+      --image /images/diamond-card.jpg
+      --task classify
+      --top-k 4
+      --width 224
+      --height 224
+      --device NPU

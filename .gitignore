@@ -1,3 +1,8 @@
 /target
 /standalone
 /output
+
+# Python
+python/.venv/
+__pycache__/
+*.pyc
