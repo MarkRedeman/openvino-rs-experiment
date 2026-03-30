@@ -34,6 +34,7 @@ DEVICE_SERVICE[NPU]=inference-npu
 
 # ── Working directory ─────────────────────────────────────────────────────────
 TMPDIR_BENCH="$(mktemp -d)"
+chmod 777 "$TMPDIR_BENCH"  # container runs as uid 1001 (openvino)
 trap 'rm -rf "$TMPDIR_BENCH"' EXIT
 
 # ── Results storage ───────────────────────────────────────────────────────────
@@ -56,9 +57,10 @@ run_one() {
 
   echo -n "  ${label} / ${device} / ${precision} ... "
 
-  # Build the command. We mount a temp dir to capture JSON output.
+  # Run benchmark; capture stdout+stderr and exit code separately.
   local output
-  if output=$(docker compose run --rm \
+  local rc=0
+  output=$(docker compose run --rm \
     -v "$TMPDIR_BENCH:/benchout" \
     "$service" \
     infer \
@@ -71,39 +73,43 @@ run_one() {
     --benchmark-report-every 0 \
     --benchmark-stage-iters 0 \
     --output-json /benchout/result.json \
-    2>&1); then
-    # Success — extract throughput
-    if [[ -f "$json_file" ]]; then
-      local fps
-      fps=$(jq -r '.report.throughput_fps' "$json_file" 2>/dev/null || echo "")
-      if [[ -n "$fps" && "$fps" != "null" ]]; then
-        # Round to 1 decimal
-        fps=$(printf "%.1f" "$fps")
-        RESULTS["$key"]="$fps"
-        echo "${fps}/s"
-        return
-      fi
+    2>&1) || rc=$?
+
+  # Check for JSON output first — the benchmark may have succeeded even if
+  # the process exited non-zero (e.g. permission error writing JSON).
+  if [[ -f "$json_file" ]]; then
+    local fps
+    fps=$(jq -r '.report.throughput_fps' "$json_file" 2>/dev/null || echo "")
+    if [[ -n "$fps" && "$fps" != "null" ]]; then
+      fps=$(printf "%.1f" "$fps")
+      RESULTS["$key"]="$fps"
+      echo "${fps}/s"
+      return
     fi
-    # JSON missing or unparseable
-    RESULTS["$key"]="DNC"
-    NOTE_INDEX=$((NOTE_INDEX + 1))
-    NOTES["$key"]="$NOTE_INDEX"
-    NOTE_LIST+=("[$NOTE_INDEX] ${label} / ${device} / ${precision}: benchmark completed but no throughput in output")
-    echo "DNC [${NOTE_INDEX}]"
-  else
-    # Failed — capture error
-    RESULTS["$key"]="DNC"
-    NOTE_INDEX=$((NOTE_INDEX + 1))
-    NOTES["$key"]="$NOTE_INDEX"
-    # Extract the most useful error line (last non-empty line, trimmed)
-    local err_line
-    err_line=$(echo "$output" | grep -iE '(error|fail|cannot|unable|unsupported|not found)' | tail -1 | sed 's/^[[:space:]]*//')
-    if [[ -z "$err_line" ]]; then
-      err_line=$(echo "$output" | tail -5 | sed 's/^[[:space:]]*//')
-    fi
-    NOTE_LIST+=("[$NOTE_INDEX] ${label} / ${device} / ${precision}: ${err_line}")
-    echo "DNC [${NOTE_INDEX}]"
   fi
+
+  # No JSON output — try to extract throughput from stdout as fallback.
+  # The line looks like: "Throughput (img/s) : 243.904" or "Throughput (run/s) : 73.1"
+  local stdout_fps
+  stdout_fps=$(echo "$output" | grep -oP 'Throughput \([^)]+\)\s*:\s*\K[0-9.]+' | head -1 || true)
+  if [[ -n "$stdout_fps" ]]; then
+    stdout_fps=$(printf "%.1f" "$stdout_fps")
+    RESULTS["$key"]="$stdout_fps"
+    echo "${stdout_fps}/s"
+    return
+  fi
+
+  # Genuine failure — record DNC with error details.
+  RESULTS["$key"]="DNC"
+  NOTE_INDEX=$((NOTE_INDEX + 1))
+  NOTES["$key"]="$NOTE_INDEX"
+  local err_line
+  err_line=$(echo "$output" | grep -iE '(error|fail|cannot|unable|unsupported|not found)' | tail -1 | sed 's/^[[:space:]]*//')
+  if [[ -z "$err_line" ]]; then
+    err_line=$(echo "$output" | tail -5 | sed 's/^[[:space:]]*//')
+  fi
+  NOTE_LIST+=("[$NOTE_INDEX] ${label} / ${device} / ${precision}: ${err_line}")
+  echo "DNC [${NOTE_INDEX}]"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
