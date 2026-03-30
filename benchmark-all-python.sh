@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # benchmark-all-python.sh — Run Python benchmarks inside Docker across all
 # model/device/precision combos and print a summary table with throughput
-# (img/s or run/s).
+# (img/s or run/s), plus a stage timing breakdown (IO+decode, preprocess,
+# inference, postprocess).
 #
 # Usage:
 #   ./benchmark-all-python.sh
@@ -16,6 +17,7 @@ set -euo pipefail
 
 DURATION=10
 WARMUP=20
+STAGE_ITERS=50
 
 COMPOSE_FILE="python/docker-compose.python.yml"
 
@@ -44,7 +46,9 @@ trap 'rm -rf "$TMPDIR_BENCH"' EXIT
 # ── Results storage ───────────────────────────────────────────────────────────
 # results[label|device|precision] = "123.45" or "DNC"
 declare -A RESULTS
-# notes[label|device|precision] = "error reason"
+# stage timing[label|device|precision] = "12.345" (ms)
+declare -A STAGE_IO STAGE_PRE STAGE_INF STAGE_POST STAGE_TOTAL
+# notes[label|device|precision] = note index
 declare -A NOTES
 NOTE_INDEX=0
 # note_list[index] = "text"
@@ -75,7 +79,8 @@ run_one() {
     --benchmark-warmup "$WARMUP" \
     --benchmark-duration "$DURATION" \
     --benchmark-report-every 0 \
-    --benchmark-stage-iters 0 \
+    --benchmark-stage-iters "$STAGE_ITERS" \
+    --benchmark-stage-read-each-iter \
     --output-json /benchout/result.json \
     2>&1) || rc=$?
 
@@ -87,6 +92,18 @@ run_one() {
     if [[ -n "$fps" && "$fps" != "null" ]]; then
       fps=$(printf "%.1f" "$fps")
       RESULTS["$key"]="$fps"
+
+      # Extract stage timing if present.
+      local st
+      st=$(jq -r '.stage_timing // empty' "$json_file" 2>/dev/null || true)
+      if [[ -n "$st" ]]; then
+        STAGE_IO["$key"]=$(jq -r '.stage_timing.io_decode_mean_ms'  "$json_file" 2>/dev/null || echo "")
+        STAGE_PRE["$key"]=$(jq -r '.stage_timing.preprocess_mean_ms' "$json_file" 2>/dev/null || echo "")
+        STAGE_INF["$key"]=$(jq -r '.stage_timing.inference_mean_ms'  "$json_file" 2>/dev/null || echo "")
+        STAGE_POST["$key"]=$(jq -r '.stage_timing.postprocess_mean_ms' "$json_file" 2>/dev/null || echo "")
+        STAGE_TOTAL["$key"]=$(jq -r '.stage_timing.total_mean_ms'    "$json_file" 2>/dev/null || echo "")
+      fi
+
       echo "${fps}/s"
       return
     fi
@@ -120,6 +137,7 @@ run_one() {
 echo "========================================"
 echo " Python Benchmark Suite (Docker)"
 echo " Duration: ${DURATION}s per run, ${WARMUP} warmup iters"
+echo " Stage timing: ${STAGE_ITERS} iters, read each iter"
 echo " Devices: ${DEVICES[*]}"
 echo "========================================"
 echo ""
@@ -135,10 +153,10 @@ for model_entry in "${MODELS[@]}"; do
   done
 done
 
-# ── Print table ───────────────────────────────────────────────────────────────
+# ── Print throughput table ────────────────────────────────────────────────────
 echo ""
 echo "========================================"
-echo " Results (Python / Docker)"
+echo " Throughput Results (Python / Docker)"
 echo "========================================"
 echo ""
 
@@ -187,6 +205,65 @@ for model_entry in "${MODELS[@]}"; do
     cell "$label" "$device" "FP16"
   done
   echo "|"
+done
+
+# ── Print stage timing table ─────────────────────────────────────────────────
+echo ""
+echo "========================================"
+echo " Stage Timing (${STAGE_ITERS} iters, disk re-read each iter)"
+echo "========================================"
+echo ""
+
+SLABEL_W=30
+SCELL_W=11
+
+fmt_ms() {
+  local val="$1"
+  if [[ -z "$val" || "$val" == "null" ]]; then
+    printf "%-${SCELL_W}s" "—"
+  else
+    printf "%-${SCELL_W}s" "$(printf "%.3f" "$val")"
+  fi
+}
+
+# Header
+printf "| %-${SLABEL_W}s| %-${SCELL_W}s| %-${SCELL_W}s| %-${SCELL_W}s| %-${SCELL_W}s| %-${SCELL_W}s|\n" \
+  "Model / Device / Prec" "IO+Dec ms" "Preproc ms" "Infer ms" "Postpr ms" "Total ms"
+
+# Separator
+printf "| "
+printf '%0.s-' $(seq 1 $SLABEL_W)
+for _ in $(seq 1 5); do
+  printf "| "
+  printf '%0.s-' $(seq 1 $SCELL_W)
+done
+echo "|"
+
+# Data rows
+for model_entry in "${MODELS[@]}"; do
+  IFS='|' read -r label _ _ _ _ _ _ <<< "$model_entry"
+  for device in "${DEVICES[@]}"; do
+    for precision in FP32 FP16; do
+      key="${label}|${device}|${precision}"
+      result="${RESULTS[$key]:-—}"
+      if [[ "$result" == "DNC" || "$result" == "—" ]]; then
+        printf "| %-${SLABEL_W}s| %-${SCELL_W}s| %-${SCELL_W}s| %-${SCELL_W}s| %-${SCELL_W}s| %-${SCELL_W}s|\n" \
+          "${label} ${device} ${precision}" "—" "—" "—" "—" "—"
+      else
+        printf "| %-${SLABEL_W}s| " "${label} ${device} ${precision}"
+        fmt_ms "${STAGE_IO[$key]:-}"
+        printf "| "
+        fmt_ms "${STAGE_PRE[$key]:-}"
+        printf "| "
+        fmt_ms "${STAGE_INF[$key]:-}"
+        printf "| "
+        fmt_ms "${STAGE_POST[$key]:-}"
+        printf "| "
+        fmt_ms "${STAGE_TOTAL[$key]:-}"
+        echo "|"
+      fi
+    done
+  done
 done
 
 # ── Notes ─────────────────────────────────────────────────────────────────────
